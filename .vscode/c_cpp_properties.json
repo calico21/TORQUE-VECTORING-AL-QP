@@ -1,0 +1,25 @@
+{
+    "configurations": [
+        {
+            "name": "STM32-TeR",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/SOFTWARE/TeR_ECU/Core/Inc",
+                "${workspaceFolder}/SOFTWARE/TeR_ECU/TeR/Inc",
+                "${workspaceFolder}/SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/inc",
+                "${workspaceFolder}/SOFTWARE/TeR_ECU/Drivers/STM32F4xx_HAL_Driver/Inc",
+                "${workspaceFolder}/SOFTWARE/TeR_ECU/Drivers/CMSIS/Device/ST/STM32F4xx/Include",
+                "${workspaceFolder}/SOFTWARE/TeR_ECU/Drivers/CMSIS/Include"
+            ],
+            "defines": [
+                "USE_HAL_DRIVER",
+                "STM32F446xx"
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++14",
+            "intelliSenseMode": "linux-gcc-arm"
+        }
+    ],
+    "version": 4
+}

@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP ESD9101P2T5G
+D Low Capacitance ESD Protection Diodes for High Speed Data Lines
+K
+F http://www.onsemi.com/pub/Collateral/ESD9101-D.PDF
+$ENDCMP
+#
+#End Doc Library
