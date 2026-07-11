@@ -24,7 +24,7 @@
 #define GP_C_ALPHA_R 32000.0f
 #define GP_MU_NOM    1.5f     
 #define GP_P_MAX_WHL 20000.0f 
-#define GP_AERO_CL_REAR 1.50f  // Coeficiente de Lift (Downforce) trasero
+#define GP_AERO_CL_REAR 2.27f  // Coeficiente de Lift (Downforce) trasero
 #define GP_AERO_AREA    1.10f  // Área frontal de referencia [m2]
 #define GP_AIR_DENSITY  1.225f // Densidad del aire [kg/m3]
 
