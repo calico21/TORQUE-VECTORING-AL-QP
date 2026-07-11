@@ -24,13 +24,22 @@
 #define GP_TC_MU_NOM         1.50f     // Asunción nominal de mu
 #define GP_TC_V_MIN          1.5f      // [m/s] Puerta de activación TC
 #define GP_TC_CLAMP_BETA     50.0f     // Sharpness del softplus
+#define GP_I_WHEEL_EST       1.20f
 
 // ── Estructura de Estado (Memoria entre ciclos) ─────────────
 typedef struct {
-    float pi_integral[4]; // Integrales por rueda (sólo RL y RR se usarán activamente)
-    float kappa_filt[4];  // Slips filtrados
-    float mu_surface;     // Estimación EMA de mu
-    float omega_prev[4];  // Para derivar la aceleración de la rueda
+    float pi_integral[4]; 
+    float kappa_filt[4];  
+    float mu_surface[2];     
+    float omega_last_raw[4];
+    float omega_prev_ema[4];
+    
+    // --- NUEVO: ESTADOS DEL OBSERVADOR RLS ---
+    float rls_P[4];        // Covarianza del error (Incertidumbre)
+    float rls_theta[4];    // Pendiente estimada (dFx / dKappa)
+    float kappa_prev[4];   // Memoria de slip para la derivada
+    float fx_prev[4];      // Memoria de fuerza para la derivada
+    float kappa_opt[4];    // Target de slip dinámico (Gradient Ascent)
 } tc_state_t;
 
 // ── Prototipos de funciones ─────────────────────────────────

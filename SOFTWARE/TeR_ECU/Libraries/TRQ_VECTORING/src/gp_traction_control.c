@@ -8,9 +8,18 @@ void gp_tc_init(tc_state_t* state) {
     for (int i = 0; i < 4; i++) {
         state->pi_integral[i] = 0.0f;
         state->kappa_filt[i] = 0.0f;
-        state->omega_prev[i] = 0.0f;
+        state->omega_last_raw[i] = 0.0f;
+        state->omega_prev_ema[i] = 0.0f;
+        
+        // Inicialización del Estimador RLS
+        state->rls_P[i] = 1000.0f;       // Alta incertidumbre inicial
+        state->rls_theta[i] = 30000.0f;  // Rigidez longitudinal típica (C_kappa positivo)
+        state->kappa_prev[i] = 0.0f;
+        state->fx_prev[i] = 0.0f;
+        state->kappa_opt[i] = 0.12f;     // Slip target nominal inicial (12%)
     }
-    state->mu_surface = GP_TC_MU_NOM;
+    state->mu_surface[0] = GP_TC_MU_NOM;
+    state->mu_surface[1] = GP_TC_MU_NOM;
 }
 
 static float gp_tc_kappa_star(float fz, float mu_rt) {
@@ -44,21 +53,46 @@ void gp_tc_step(
     tc_state_t* state
 ) {
     float t_mean_abs = (fabsf(t_req_out[GP_RL]) + fabsf(t_req_out[GP_RR])) * 0.5f;
-    float fx_rl = t_req_out[GP_RL] / GP_R_WHEEL;
-    float fx_rr = t_req_out[GP_RR] / GP_R_WHEEL;
+    
+    float omega_ema_rl = 0.1f * omega[GP_RL] + 0.9f * state->omega_prev_ema[GP_RL];
+    float raw_omega_dot_rl = (omega_ema_rl - state->omega_prev_ema[GP_RL]) / dt;
+
+    float omega_ema_rr = 0.1f * omega[GP_RR] + 0.9f * state->omega_prev_ema[GP_RR];
+    float raw_omega_dot_rr = (omega_ema_rr - state->omega_prev_ema[GP_RR]) / dt;
+
+    float omega_dot_rl = GP_CLAMP(raw_omega_dot_rl, -5000.0f, 5000.0f);
+    float omega_dot_rr = GP_CLAMP(raw_omega_dot_rr, -5000.0f, 5000.0f);
+
+    float fx_rl = (t_req_out[GP_RL] - GP_I_WHEEL_EST * omega_dot_rl) / GP_R_WHEEL;
+    float fx_rr = (t_req_out[GP_RR] - GP_I_WHEEL_EST * omega_dot_rr) / GP_R_WHEEL;
+    
+    // Array auxiliar para iterar fácil
+    float fx_wheels[4] = {0.0f};
+    fx_wheels[GP_RL] = fx_rl;
+    fx_wheels[GP_RR] = fx_rr;
     
     float mu_rl = fx_rl / GP_MAX(fz[GP_RL], 100.0f);
     float mu_rr = fx_rr / GP_MAX(fz[GP_RR], 100.0f);
-    float mu_meas = GP_CLAMP((mu_rl + mu_rr) * 0.5f, GP_TC_MU_LO, GP_TC_MU_HI);
-    
+    float mu_meas[2];
+
+    mu_meas[0] = GP_CLAMP(mu_rl, GP_TC_MU_LO, GP_TC_MU_HI);
+    mu_meas[1] = GP_CLAMP(mu_rr, GP_TC_MU_LO, GP_TC_MU_HI);
+
     float gate_mu = gp_sigmoid(t_mean_abs - 20.0f);
     float alpha_gated = GP_TC_ALPHA_MU_EMA * gate_mu;
-    state->mu_surface = GP_CLAMP((1.0f - alpha_gated) * state->mu_surface + alpha_gated * mu_meas, GP_TC_MU_LO, GP_TC_MU_HI);
 
+    for (int w = 0; w < 2; w++) {
+        state->mu_surface[w] = GP_CLAMP(
+            (1.0f - alpha_gated) * state->mu_surface[w] +
+            alpha_gated * mu_meas[w],
+            GP_TC_MU_LO,
+            GP_TC_MU_HI
+        );
+    }
+    
     float cs_factor = gp_tc_combined_slip_factor(vx, vy, wz);
     float speed_gate = gp_sigmoid((vx - GP_TC_V_MIN) * 3.0f);
     
-    // Multiplicamos limpiamente las ganancias base en lugar de hackear la salida del PI
     float kp_eff = (GP_TC_KP * 20.0f) * (1.0f + GP_TC_V_KP_SCALE / (fabsf(vx) + 0.5f));
     float ki_eff = (GP_TC_KI * 20.0f);
 
@@ -67,13 +101,48 @@ void gp_tc_step(
     for (int w = 0; w < 2; w++) {
         int i = rear_wheels[w];
         
-        float kappa_star = gp_tc_kappa_star(fz[i], state->mu_surface) * cs_factor;
         float kappa_raw = gp_tc_compute_kappa(omega[i], vx);
         
-        // FIX 1: Filtro de ruido mecánico. Ignoramos todo transitorio por encima de ~3.5 Hz
-        float alpha_lp = 0.90f; // 90% inercia, 10% señal nueva
+        // Filtro LP del Slip Ratio
+        float alpha_lp = 0.90f; 
         state->kappa_filt[i] = alpha_lp * state->kappa_filt[i] + (1.0f - alpha_lp) * kappa_raw;
         
+        // --- 1. OBSERVADOR RLS (Recursive Least Squares de Pacejka) ---
+        float d_kappa = state->kappa_filt[i] - state->kappa_prev[i]; 
+        float d_fx = fx_wheels[i] - state->fx_prev[i];
+        
+        state->kappa_prev[i] = state->kappa_filt[i];
+        state->fx_prev[i] = fx_wheels[i];
+        
+        // Solo actualizamos el modelo si hay excitación real y estamos en movimiento
+        if (fabsf(d_kappa) > 0.0001f && vx > 2.0f) {
+            float lambda = 0.985f; // Forgetting factor (ventana de ~330ms)
+            float P = state->rls_P[i];
+            float phi = d_kappa;
+            float y = d_fx;
+            
+            float denom = lambda + P * phi * phi;
+            float K = (P * phi) / denom; // Ganancia de Kalman
+            
+            float theta_hat = state->rls_theta[i];
+            float error_rls = y - phi * theta_hat;
+            
+            // Actualización de estado con límites anti-divergencia
+            state->rls_theta[i] = GP_CLAMP(theta_hat + K * error_rls, -50000.0f, 150000.0f);
+            state->rls_P[i] = GP_CLAMP((P - K * phi * P) / lambda, 10.0f, 10000.0f);
+        }
+        
+        // --- 2. GRADIENT ASCENT DEL SLIP TARGET ---
+        // Si la pendiente es positiva, buscamos más slip. Si es negativa, cortamos radicalmente.
+        float lr = 0.000005f; // Learning rate calibrado para dFx/dKappa
+        state->kappa_opt[i] += lr * state->rls_theta[i] * dt;
+        state->kappa_opt[i] = GP_CLAMP(state->kappa_opt[i], 0.05f, 0.22f); 
+        
+        // Target Híbrido: 50% Analítico (Seguridad) + 50% RLS (Adaptativo en vivo)
+        float kappa_analytical = gp_tc_kappa_star(fz[i], state->mu_surface[w]) * cs_factor;
+        float kappa_star = 0.5f * kappa_analytical + 0.5f * state->kappa_opt[i];
+        // -------------------------------------------------------------
+
         float error = state->kappa_filt[i] - kappa_star; 
         
         float raw_integral = state->pi_integral[i] + error * dt * speed_gate;
@@ -81,21 +150,16 @@ void gp_tc_step(
         
         float pi_out = kp_eff * error + ki_eff * state->pi_integral[i];
         
-        // FIX 2: Filtro derivativo. Filtramos omega ANTES de restarla para la derivada.
-        float omega_ema = 0.1f * omega[i] + 0.9f * state->omega_prev[i];
-        float omega_dot = (omega_ema - state->omega_prev[i]) / dt;
-        state->omega_prev[i] = omega_ema; // Guardamos la velocidad ya suavizada
-        
-        // Feedforward derivativo anticipativo (Umbral de 250 y verificando que haya error real)
-        /* Gate suave: vale ~1 si hay error positivo (patinaje), ~0 si no hay error */
-        float error_gate = gp_sigmoid(error * 50.0f); 
+        float omega_ema = 0.1f * omega[i] + 0.9f * state->omega_prev_ema[i];
+        float omega_dot = (omega_ema - state->omega_prev_ema[i]) / dt;
 
-        /* Derivada continua: solo crece a partir de 250 rad/s^2, pero sin esquinas matemáticas.
-        Multiplicamos por 20.0f para escalar de vuelta el factor 0.05f interno */
+        state->omega_prev_ema[i] = omega_ema;
+        state->omega_last_raw[i] = omega[i];
+        
+        float error_gate = gp_sigmoid(error * 50.0f); 
         float deriv_kick = 2.0f * (20.0f * gp_softplus((omega_dot - 250.0f) * 0.05f));
 
-        /* Se aplica el recorte de par predictivo de forma puramente continua */
-        pi_out -= deriv_kick * error_gate; // O += si vuestra lógica de recorte suma torque negativo
+        pi_out -= deriv_kick * error_gate; 
         
         float reduction = speed_gate * gp_softplus(pi_out * GP_TC_CLAMP_BETA) / GP_TC_CLAMP_BETA;
         float t_cmd = t_req_out[i] - reduction;

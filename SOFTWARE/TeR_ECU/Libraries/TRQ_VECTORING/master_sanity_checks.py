@@ -7,10 +7,19 @@ import os
 # 1. ESTRUCTURAS ACTUALIZADAS (Ctypes)
 # =====================================================================
 class TCState(ctypes.Structure):
-    _fields_ = [("pi_integral", ctypes.c_float * 4),
-                ("kappa_filt", ctypes.c_float * 4),
-                ("mu_surface", ctypes.c_float),
-                ("omega_prev", ctypes.c_float * 4)] # NUEVO: Para el TC Anticipativo
+    _fields_ = [
+        ("pi_integral", ctypes.c_float * 4),
+        ("kappa_filt", ctypes.c_float * 4),
+        ("mu_surface", ctypes.c_float * 2),
+        ("omega_last_raw", ctypes.c_float * 4),
+        ("omega_prev_ema", ctypes.c_float * 4),
+        # --- NUEVO OBSERVADOR RLS ---
+        ("rls_P", ctypes.c_float * 4),
+        ("rls_theta", ctypes.c_float * 4),
+        ("kappa_prev", ctypes.c_float * 4),
+        ("fx_prev", ctypes.c_float * 4),
+        ("kappa_opt", ctypes.c_float * 4),
+    ]
 
 class TVState(ctypes.Structure):
     _fields_ = [("wz_int", ctypes.c_float),
@@ -18,8 +27,9 @@ class TVState(ctypes.Structure):
                 ("t_qp_prev", ctypes.c_float * 4),
                 ("t_out_prev", ctypes.c_float * 4),
                 ("tc", TCState),
-                ("alpha_qp", ctypes.c_float),  # <--- AÑADIDO
-                ("lam_prev", ctypes.c_float)]  # <--- AÑADIDO
+                ("vy_est", ctypes.c_float),
+                ("alpha_qp", ctypes.c_float),
+                ("lam_prev", ctypes.c_float)]
 
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')
@@ -42,7 +52,8 @@ def run_scenario(time_array, input_generator):
     state = TVState()
     # ELIMINAR: ctypes.memset(ctypes.byref(state), 0, ctypes.sizeof(TVState))
     gp_lib.gp_tv_init(ctypes.byref(state)) # <--- AÑADIDO: Llama a C directamente
-    state.tc.mu_surface = 1.5
+    state.tc.mu_surface[0] = 1.5
+    state.tc.mu_surface[1] = 1.5
     
     t_rl_log, t_rr_log, tv_diff_log = [], [], []
     
@@ -170,13 +181,40 @@ plt.rcParams.update({
     'axes.labelcolor': 'black', 'xtick.color': 'black', 'ytick.color': 'black'
 })
 
+def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, test_name):
+    """ Evalúa la señal matemática y decide si el coche sobrevive o rompe. """
+    # 1. Detección de Chattering (Ruido de alta frecuencia letal para el inversor)
+    slew_rate_rl = np.diff(t_rl) / (time_steps[1] - time_steps[0])
+    noise_rms = np.std(slew_rate_rl)
+    
+    # 2. Detección de Inestabilidad (Oscilación divergente o picos absurdos)
+    max_torque = np.max(np.abs(t_rl))
+    
+    # 3. Criterios de Validación (Límites duros)
+    is_chattering = noise_rms > 5000.0  # Límite de slew rate "saludable"
+    is_exploding = max_torque > 600.0   # Más de 600 Nm por rueda es un error matemático
+    
+    if is_exploding:
+        status = "❌ FAIL (Divergencia)"
+        color = "\033[91m" # Rojo
+    elif is_chattering:
+        status = "⚠️ WARN (Chattering)"
+        color = "\033[93m" # Amarillo
+    else:
+        status = "✅ PASS"
+        color = "\033[92m" # Verde
+        
+    reset_color = "\033[0m"
+    print(f"{color}{status:<18} | {test_name:<42} | Ruido RMS: {noise_rms:7.1f} | Par Max: {max_torque:5.1f} Nm{reset_color}")
+
 def generate_report(scenarios, titles, filename, super_title, time_steps):
     fig, axs = plt.subplots(2, 2, figsize=(15, 9))
     fig.suptitle(super_title, fontsize=16, fontweight='bold')
     
     for ax, (scenario, title) in zip(axs.flat, zip(scenarios, titles)):
         rl, rr, diff = run_scenario(time_steps, scenario)
-        
+        # NUEVA LÍNEA: Imprimir diagnóstico numérico por terminal
+        evaluate_test_kpis(time_steps, rl, rr, diff, title)
         ax.plot(time_steps, rl, color='#0052cc', linewidth=2.5, label='RL Torque (Nm)')
         ax.plot(time_steps, rr, color='#e60000', linewidth=2.5, linestyle='--', label='RR Torque (Nm)')
         
@@ -221,7 +259,8 @@ def run_comparison(time_array, input_generator):
     state_new = TVState()
     # ELIMINAR: ctypes.memset(ctypes.byref(state_new), 0, ctypes.sizeof(TVState))
     gp_lib.gp_tv_init(ctypes.byref(state_new)) # <--- AÑADIDO: Llama a C directamente
-    state_new.tc.mu_surface = 1.5 
+    state_new.tc.mu_surface[0] = 1.5
+    state_new.tc.mu_surface[1] = 1.5
     # ...
     legacy_tv = LegacyTV()
     
