@@ -278,7 +278,278 @@ def generate_comparison_report(scenarios, titles, filename, super_title, time_st
     print(f"✅ Generated: {output_path}")
     plt.close()
 
+# =====================================================================
+# PHASE 8: FSAE Dynamic Events (Competition Scoring Scenarios)
+# =====================================================================
 
+def scenario_accel_75m(t):
+    """13: Acceleration 75m. Rampa de velocidad con wheelspin inducido para testear el TC."""
+    fx = 3000.0  # ~3000 N de empuje solicitado
+    delta = 0.0  # Recta perfecta
+    vx = min(t * 12.0, 30.0) # Acelera hasta 30 m/s
+    vy = 0.0
+    wz = 0.0
+    ay = 0.0
+    ax = 11.8
+    # Forzamos un 15% de slip ratio constante (ruedas traseras girando más rápido)
+    w_rear = (vx / 0.23) * 1.15 
+    omega = [0.0, 0.0, w_rear, w_rear] 
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_skidpad_transition(t):
+    """14: Skidpad Transition. Inversión brusca de Gs laterales y Yaw Rate."""
+    fx = 1500.0
+    delta = -0.7 if t < 1.5 else 0.7  # Cambio brusco de dirección en radianes (~40 grados)
+    vx = 12.0             # Velocidad constante ~43 km/h
+    vy = -0.5 if t < 1.5 else 0.5
+    wz = -1.2 if t < 1.5 else 1.2       # Inversión instantánea de guiñada
+    ay = -14.4 if t < 1.5 else 14.4     # ~1.5G lateral que cambia de lado
+    ax = 0.0
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_endurance_hairpin(t):
+    """15: Endurance Hairpin. Frenada fuerte, vértice lento, tracción máxima."""
+    fx = 0.0 if t < 1.5 else min((t - 1.5) * 3000.0, 2500.0)
+    brake = 1.0 if t < 1.0 else 0.0
+    delta = 1.2 if 1.0 <= t <= 2.0 else 0.0 # Giro cerrado (~70 grados en radianes)
+    vx = (15.0 - t*10.0) if t < 1.0 else (5.0 + (t-1.0)*5.0) # Baja a 5m/s y luego acelera
+    vy = 0.0
+    wz = 1.5 if delta > 0.0 else 0.0
+    ay = vx * wz
+    ax = -10.0 if brake > 0.0 else (fx / 250.0)
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_fast_sweeper(t):
+    """16: Autocross Sweeper. Apoyo lateral mantenido a alta velocidad."""
+    fx = 2000.0
+    delta = 0.5 # ~30 grados
+    vx = 22.0  # ~80 km/h
+    vy = 0.2
+    wz = 0.8
+    ay = vx * wz
+    ax = 0.0
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+
+# =====================================================================
+# PHASE 9: Hardware Limits & Degradation (Torture Module)
+# =====================================================================
+
+def scenario_thermal_mu_drop(t):
+    """17: Thermal Degradation. Caída de grip en pleno vértice."""
+    fx = 1800.0
+    delta = 0.6
+    vx = 15.0
+    vy = 0.5 if t < 1.5 else 2.5 # El coche de repente empieza a deslizar lateralmente
+    wz = 1.0 if t < 1.5 else 1.6 # Pico de sobreviraje
+    ay = 15.0 if t < 1.5 else 10.0 # Caída brusca de fuerza lateral
+    ax = 0.0
+    w_rear = (vx / 0.23) if t < 1.5 else (vx / 0.23) * 1.5 # Las traseras rompen tracción
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_bms_power_derating(t):
+    """18: BMS Power Derating. Pérdida de empuje por calentamiento de batería."""
+    fx = 2500.0
+    delta = 0.0
+    vx = (t * 8.0) if t < 1.5 else (12.0 + (t - 1.5) * 2.0) # El ratio de aceleración se desploma
+    vy = 0.0
+    wz = 0.0
+    ay = 0.0
+    ax = 8.0 if t < 1.5 else 2.0 # La G longitudinal cae pese a tener el pedal a fondo
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_asymmetric_wear(t):
+    """19: Asymmetric Tire Wear. Diferencia de radio/grip generando un drift fantasma."""
+    fx = 2000.0
+    delta = 0.0
+    vx = 20.0
+    vy = 0.0
+    wz = 0.15 if t > 1.0 else 0.0 # El coche tira hacia un lado en línea recta
+    ay = 0.0
+    ax = 0.0
+    w_rl = (vx / 0.23) * 1.05 if t > 1.0 else (vx / 0.23) # Desajuste en la rueda izquierda
+    w_rr = vx / 0.23
+    omega = [0.0, 0.0, w_rl, w_rr]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_sine_with_dwell(t):
+    """20: Sine with Dwell. Volantazo ISO para test de estabilidad (Moose Test)."""
+    fx = 1200.0
+    if 0.5 < t <= 1.0:
+        delta = 0.8   # Volantazo fuerte a un lado (rads)
+    elif 1.0 < t <= 1.5:
+        delta = 0.8   # Mantenemos
+    elif 1.5 < t <= 2.2:
+        delta = -0.8  # Recuperación agresiva al lado contrario
+    else:
+        delta = 0.0
+        
+    vx = 18.0
+    vy = 0.0
+    wz = delta * 1.5  # Guiñada proporcional a la dirección
+    ay = wz * vx
+    ax = 0.0
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+# =====================================================================
+# PHASE 10: Absolute Limits & Envelope Expansion (AL-QP Standalone)
+# =====================================================================
+
+def scenario_vmax_aero_drag(t):
+    """21: V-Max Aero-Drag Saturation. Empuje máximo a 120 km/h (35 m/s). 
+    El solver debe gestionar el downforce masivo frente a la saturación de los inversores."""
+    fx = 5000.0 # Pedimos una barbaridad de empuje
+    delta = 0.0
+    vx = np.clip(10.0 + (t * 10.0), 10.0, 35.0) # Sube hasta 126 km/h
+    vy = 0.0
+    wz = 0.0
+    ay = 0.0
+    ax = 15.0 - (vx * 0.1) # La aceleración cae por el drag aerodinámico
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_step_steer_high_speed(t):
+    """22: High-Speed Step Steer. Un volantazo instantáneo a 100 km/h.
+    Prueba de fuego para la latencia del TV y la estabilidad del chasis."""
+    fx = 1500.0
+    delta = 0.0 if t < 1.0 else 0.4 # Volantazo repentino de ~23 grados a los 1.0s
+    vx = 28.0 # ~100 km/h fijos
+    vy = 0.0 if t < 1.0 else 1.5 # Deriva lateral reactiva
+    wz = 0.0 if t < 1.0 else 1.2
+    ay = 0.0 if t < 1.0 else (vx * wz)
+    ax = 0.0
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_friction_circle_mapping(t):
+    """23: G-Circle Spiral Mapping. Acelerador y volante aumentan simultáneamente
+    para mapear el borde exterior de la elipse de Kamm."""
+    # El piloto pisa progresivamente y gira progresivamente
+    fx = t * 1500.0 
+    delta = t * 0.3 
+    vx = 15.0
+    vy = t * 0.5
+    wz = delta * 1.2
+    ay = wz * vx
+    ax = fx / 300.0 # Aceleración sintética
+    # Forzamos un slip lateral y longitudinal combinado
+    w_rear = (vx / 0.23) * (1.0 + t*0.05) 
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_hydroplaning_survival(t):
+    """24: Hydroplaning / Black Ice. Pérdida absoluta de tracción en las 4 ruedas.
+    El TC tiene que ahogar los motores a 0 Nm sin errores matemáticos."""
+    fx = 3000.0
+    delta = 0.0
+    vx = 20.0
+    vy = 0.0
+    wz = 0.0
+    ay = 0.0
+    ax = 0.0
+    # En t=1.0, las ruedas patinan a 3 veces la velocidad del coche (aquaplaning severo)
+    w_rear = (vx / 0.23) if t < 1.0 else (vx / 0.23) * 3.0 
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+# =====================================================================
+# PHASE 11: Ultimate Performance & Race-Pace Analytics
+# =====================================================================
+
+def scenario_mid_corner_curb(t):
+    """25: Curb Strike. Apoyo fuerte y la rueda interior salta sobre un piano."""
+    fx = 2000.0
+    delta = 0.6  # Curva a izquierdas
+    vx = 22.0
+    vy = 0.5
+    wz = 1.0
+    ay = vx * wz
+    ax = 0.0
+    
+    # En t=1.2, la rueda trasera izquierda (interior) salta y pierde agarre 
+    # (simulado con un pico salvaje de RPM)
+    w_rl = (vx / 0.23) if not (1.2 < t < 1.35) else (vx / 0.23) * 2.5
+    w_rr = vx / 0.23
+    omega = [0.0, 0.0, w_rl, w_rr]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_variable_grip_launch(t):
+    """26: Variable Grip. Salida a fondo pisando parches de polvo/pintura."""
+    fx = 3500.0 # Gas a tabla
+    delta = 0.0
+    vx = min(t * 12.0, 35.0)
+    vy = 0.0
+    wz = 0.0
+    ay = 0.0
+    ax = 11.5
+    
+    # Introducimos ruido de alta frecuencia en el slip para simular asfalto roto
+    noise = np.sin(t * 50.0) * 0.4 
+    w_rear = (vx / 0.23) * (1.1 + noise if t > 0.5 else 1.0)
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_trail_braking_apex(t):
+    """27: Trail Braking. Transición de saturación longitudinal a lateral."""
+    # Frena fuerte, luego va dando gas
+    fx = 0.0 if t < 1.5 else min((t - 1.5) * 2500.0, 2000.0)
+    brake = max(1.0 - t, 0.0) # Suelta el freno progresivamente de t=0 a t=1
+    
+    # Empieza a girar el volante justo mientras suelta el freno
+    delta = min(t * 0.8, 1.2) if t < 2.0 else 1.2 
+    
+    vx = max(25.0 - (t * 10.0), 12.0) if t < 1.5 else min(12.0 + (t-1.5)*5.0, 20.0)
+    vy = 0.0
+    wz = delta * 1.1
+    ay = vx * wz
+    ax = -12.0 if brake > 0 else (fx / 250.0)
+    
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_limit_slalom(t):
+    """28: Slalom de velocidad creciente. Hasta que el chasis no pueda más."""
+    fx = 1500.0
+    # Volante haciendo zig-zag constante
+    delta = np.sin(t * np.pi * 1.5) * 0.7 
+    # Velocidad aumentando constantemente de 50 a 110 km/h
+    vx = 14.0 + (t * 6.0) 
+    vy = np.cos(t * np.pi * 1.5) * (vx * 0.05)
+    wz = delta * (1.5 - (vx * 0.02)) # El chasis responde menos a alta velocidad
+    ay = vx * wz
+    ax = 2.0
+    
+    w_rear = vx / 0.23
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, vy, wz, ay, ax, omega, brake
 # =====================================================================
 # 6. MAIN EXECUTION
 # =====================================================================
@@ -328,6 +599,44 @@ if __name__ == "__main__":
           '11: Trail Braking (Brake to Throttle)', '12: Lift-off Oversteer (Rate Limiter)']
     generate_comparison_report(s7, t7, 'sanity_phase7_dogfight_robustness.png', 
                                'Phase 7: Signal Filtering & Robustness (PD vs. AL-QP)', time_steps, 'robustness')
+    
+    # ------------------ SECTION C: COMPETITION & TORTURE ------------------
+    print("\nStarting Phase 8 & 9: Competition & Hardware Torture...")
+
+    # Phase 8: FSAE Dynamic Events (Competition Scoring Scenarios)
+    s8 = [scenario_accel_75m, scenario_skidpad_transition, scenario_endurance_hairpin, scenario_fast_sweeper]
+    t8 = ['13: Acceleration 75m (Slip Tracking)', '14: Skidpad Transition (Center Figure-8)', 
+          '15: Endurance Hairpin (Mechanical Grip)', '16: Autocross Sweeper (Aero Supported)']
+    generate_comparison_report(s8, t8, 'sanity_phase8_dogfight_dynamics.png', 
+                               'Phase 8: FSAE Dynamic Events (AL-QP vs. PD)', time_steps, 'lateral')
+
+    # Phase 9: Hardware Limits & Degradation (Torture Module)
+    s9 = [scenario_thermal_mu_drop, scenario_bms_power_derating, scenario_asymmetric_wear, scenario_sine_with_dwell]
+    t9 = ['17: Thermal Degradation (Mid-Corner Drop)', '18: BMS Power Derating (Endurance Heat)', 
+          '19: Asymmetric Tire Wear (RL Mod Shift)', '20: Sine with Dwell (Evasive Maneuver ISO)']
+    generate_comparison_report(s9, t9, 'sanity_phase9_dogfight_limits.png', 
+                               'Phase 9: Hardware Limits & Degradation (AL-QP vs. PD)', time_steps, 'robustness')
+
+    # ------------------ SECTION D: ABSOLUTE LIMITS ------------------
+    print("\nStarting Phase 10: Envelope Expansion (Absolute Limits)...")
+
+    s10 = [scenario_vmax_aero_drag, scenario_step_steer_high_speed, scenario_friction_circle_mapping, scenario_hydroplaning_survival]
+    t10 = ['21: V-Max Aero-Drag (126 km/h Downforce)', '22: High-Speed Step Steer (100 km/h Transient)', 
+           '23: G-Circle Spiral Mapping (Combined Slip)', '24: Hydroplaning Survival (Massive Over-rev)']
+    
+    # OJO: Usamos generate_report (el de las fases 1-4), NO generate_comparison_report
+    generate_report(s10, t10, 'sanity_phase10_envelope_expansion.png', 
+                    'Phase 10: AL-QP Absolute Performance Envelope', time_steps)
+    
+    # ------------------ SECTION E: ULTIMATE PERFORMANCE ------------------
+    print("\nStarting Phase 11: Ultimate Performance & Race-Pace Analytics...")
+
+    s11 = [scenario_mid_corner_curb, scenario_variable_grip_launch, scenario_trail_braking_apex, scenario_limit_slalom]
+    t11 = ['25: Mid-Corner Curb Strike (Transient TC/TV)', '26: Variable Grip Launch (Pacejka Tracking)', 
+           '27: Aggressive Trail Braking (Combined Saturation)', '28: Limit Slalom (Dynamic Degration)']
+    
+    generate_report(s11, t11, 'sanity_phase11_ultimate_performance.png', 
+                    'Phase 11: AL-QP Race-Pace Analytics', time_steps)
 
     # --- Final KPIs ---
     _, rr_I, _ = run_scenario(time_steps, scenario_slalom)
