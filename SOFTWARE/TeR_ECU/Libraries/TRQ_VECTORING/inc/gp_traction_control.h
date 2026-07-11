@@ -34,12 +34,13 @@ typedef struct {
     float omega_last_raw[4];
     float omega_prev_ema[4];
     
-    // --- NUEVO: ESTADOS DEL OBSERVADOR RLS ---
-    float rls_P[4];        // Covarianza del error (Incertidumbre)
-    float rls_theta[4];    // Pendiente estimada (dFx / dKappa)
-    float kappa_prev[4];   // Memoria de slip para la derivada
-    float fx_prev[4];      // Memoria de fuerza para la derivada
-    float kappa_opt[4];    // Target de slip dinámico (Gradient Ascent)
+    // Estados del observador RLS
+    float rls_P[4];        
+    float rls_theta[4];    
+    float theta_prev[4];   // <-- Debe estar aquí
+    float kappa_prev[4];   
+    float fx_prev[4];      
+    float kappa_opt[4];    
 } tc_state_t;
 
 // ── Prototipos de funciones ─────────────────────────────────

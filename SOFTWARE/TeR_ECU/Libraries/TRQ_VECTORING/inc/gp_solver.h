@@ -22,4 +22,14 @@ void gp_qp_solve_rwd(
     float* qp_residual
 );
 
+void gp_qp_solve_rwd_closedform(
+    const float t_warmstart[4],
+    const float t_prev[4],
+    float fx_driver,
+    const float t_lb[4],
+    const float t_ub[4],
+    float t_out[4],
+    float* qp_residual
+);
+
 #endif // GP_SOLVER_H

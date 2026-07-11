@@ -16,9 +16,9 @@ typedef struct {
     float t_qp_prev[4];
     float t_out_prev[4];
     tc_state_t tc;
-    float vy_est;     // Observador de velocidad lateral V2.0
-    float alpha_qp;   // Optimizador del QP (Warm-start)
-    float lam_prev;   // Memoria del Lagrangiano (Warm-start)
+    float vy_est;     
+    float alpha_qp;   // <-- Debe estar aquí
+    float lam_prev;   // <-- Debe estar aquí
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);

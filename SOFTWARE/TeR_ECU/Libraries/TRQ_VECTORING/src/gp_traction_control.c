@@ -13,7 +13,8 @@ void gp_tc_init(tc_state_t* state) {
         
         // Inicialización del Estimador RLS
         state->rls_P[i] = 1000.0f;       // Alta incertidumbre inicial
-        state->rls_theta[i] = 30000.0f;  // Rigidez longitudinal típica (C_kappa positivo)
+        state->rls_theta[i] = 30000.0f;  
+        state->theta_prev[i] = 30000.0f; // <--- NUEVA LÍNEA
         state->kappa_prev[i] = 0.0f;
         state->fx_prev[i] = 0.0f;
         state->kappa_opt[i] = 0.12f;     // Slip target nominal inicial (12%)
@@ -107,36 +108,48 @@ void gp_tc_step(
         float alpha_lp = 0.90f; 
         state->kappa_filt[i] = alpha_lp * state->kappa_filt[i] + (1.0f - alpha_lp) * kappa_raw;
         
-        // --- 1. OBSERVADOR RLS (Recursive Least Squares de Pacejka) ---
-        float d_kappa = state->kappa_filt[i] - state->kappa_prev[i]; 
+        // --- 1. OBSERVADOR RLS ---
+        float prev_k = state->kappa_prev[i]; // GUARDAMOS EL ESTADO REAL
+        
+        float d_kappa = state->kappa_filt[i] - prev_k; 
         float d_fx = fx_wheels[i] - state->fx_prev[i];
         
-        state->kappa_prev[i] = state->kappa_filt[i];
+        state->kappa_prev[i] = state->kappa_filt[i]; // Ahora podemos sobrescribir
         state->fx_prev[i] = fx_wheels[i];
         
-        // Solo actualizamos el modelo si hay excitación real y estamos en movimiento
         if (fabsf(d_kappa) > 0.0001f && vx > 2.0f) {
-            float lambda = 0.985f; // Forgetting factor (ventana de ~330ms)
+            float lambda = 0.985f; 
             float P = state->rls_P[i];
             float phi = d_kappa;
             float y = d_fx;
             
             float denom = lambda + P * phi * phi;
-            float K = (P * phi) / denom; // Ganancia de Kalman
+            float K = (P * phi) / denom; 
             
             float theta_hat = state->rls_theta[i];
             float error_rls = y - phi * theta_hat;
             
-            // Actualización de estado con límites anti-divergencia
             state->rls_theta[i] = GP_CLAMP(theta_hat + K * error_rls, -50000.0f, 150000.0f);
             state->rls_P[i] = GP_CLAMP((P - K * phi * P) / lambda, 10.0f, 10000.0f);
         }
         
-        // --- 2. GRADIENT ASCENT DEL SLIP TARGET ---
-        // Si la pendiente es positiva, buscamos más slip. Si es negativa, cortamos radicalmente.
-        float lr = 0.000005f; // Learning rate calibrado para dFx/dKappa
-        state->kappa_opt[i] += lr * state->rls_theta[i] * dt;
-        state->kappa_opt[i] = GP_CLAMP(state->kappa_opt[i], 0.05f, 0.22f); 
+        // --- 2. GRADIENT ASCENT + SECANTE (Corregida) ---
+        float dtheta = state->rls_theta[i] - state->theta_prev[i];
+        
+        // Usamos el prev_k rescatado para calcular el intercepto real
+        float kappa_secant = (prev_k * state->rls_theta[i] - 
+                              state->kappa_filt[i] * state->theta_prev[i]) / 
+                             (dtheta + copysignf(10.0f, dtheta));
+                             
+        float secant_ok = gp_sigmoid(fabsf(dtheta) / 500.0f - 2.0f);
+        
+        float lr = 0.000005f; 
+        float kappa_grad = state->kappa_opt[i] + lr * state->rls_theta[i] * dt;
+
+        state->kappa_opt[i] = secant_ok * GP_CLAMP(kappa_secant, 0.05f, 0.22f) + 
+                              (1.0f - secant_ok) * GP_CLAMP(kappa_grad, 0.05f, 0.22f);
+                              
+        state->theta_prev[i] = state->rls_theta[i];
         
         // Target Híbrido: 50% Analítico (Seguridad) + 50% RLS (Adaptativo en vivo)
         float kappa_analytical = gp_tc_kappa_star(fz[i], state->mu_surface[w]) * cs_factor;

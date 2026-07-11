@@ -6,6 +6,8 @@ import os
 # =====================================================================
 # 1. ESTRUCTURAS ACTUALIZADAS (Ctypes)
 # =====================================================================
+import ctypes
+
 class TCState(ctypes.Structure):
     _fields_ = [
         ("pi_integral", ctypes.c_float * 4),
@@ -13,24 +15,25 @@ class TCState(ctypes.Structure):
         ("mu_surface", ctypes.c_float * 2),
         ("omega_last_raw", ctypes.c_float * 4),
         ("omega_prev_ema", ctypes.c_float * 4),
-        # --- NUEVO OBSERVADOR RLS ---
         ("rls_P", ctypes.c_float * 4),
         ("rls_theta", ctypes.c_float * 4),
+        ("theta_prev", ctypes.c_float * 4),  # <-- Crítico para la secante
         ("kappa_prev", ctypes.c_float * 4),
         ("fx_prev", ctypes.c_float * 4),
         ("kappa_opt", ctypes.c_float * 4),
     ]
 
 class TVState(ctypes.Structure):
-    _fields_ = [("wz_int", ctypes.c_float),
-                ("delta_prev", ctypes.c_float),
-                ("t_qp_prev", ctypes.c_float * 4),
-                ("t_out_prev", ctypes.c_float * 4),
-                ("tc", TCState),
-                ("vy_est", ctypes.c_float),
-                ("alpha_qp", ctypes.c_float),
-                ("lam_prev", ctypes.c_float)]
-
+    _fields_ = [
+        ("wz_int", ctypes.c_float),
+        ("delta_prev", ctypes.c_float),
+        ("t_qp_prev", ctypes.c_float * 4),
+        ("t_out_prev", ctypes.c_float * 4),
+        ("tc", TCState),
+        ("vy_est", ctypes.c_float),
+        ("alpha_qp", ctypes.c_float),  # <-- Crítico para el AL-QP Iterativo
+        ("lam_prev", ctypes.c_float),  # <-- Crítico para el AL-QP Iterativo
+    ]
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')
 except OSError:

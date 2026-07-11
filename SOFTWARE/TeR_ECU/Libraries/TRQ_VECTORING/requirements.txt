@@ -1,0 +1,4 @@
+rich
+python-can
+PyQtGraph
+numpy

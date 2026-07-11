@@ -30,7 +30,6 @@ void gp_tv_init(tv_state_t* state) {
         state->t_out_prev[i] = 0.0f;
     }
     gp_tc_init(&state->tc);
-    
     state->vy_est = 0.0f;
     
     float h = GP_W_REG + GP_W_SMOOTH;
@@ -91,6 +90,7 @@ void gp_tv_step(
     float fb_mz = kp * wz_err + ki * state->wz_int;
     float mz_req = GP_CLAMP((ff_mz + fb_mz) * os_gate * counter_steer_factor, -GP_TV_MAX_MZ, GP_TV_MAX_MZ);
     
+    // 7. Límites de los Neumáticos y LÍMITES TÉRMICOS (Derating)
     float t_lb[4] = {0.0f, 0.0f, 0.0f, 0.0f}; 
     float t_ub_friction[4];
     float t_ub_power[4];
@@ -100,10 +100,31 @@ void gp_tv_step(
     gp_friction_ellipse_t_ub(fz_est, fy_est, mu_avg, t_ub_friction);
     gp_power_limited_t_ub(omega, t_ub_power);
     
+    // --- NUEVO: DERATING TÉRMICO (Soft-Cut) ---
+    // Simulación: Asumimos que extraes las temps de tu bus CAN (TeR.invInfo.left_motor_temp)
+    // Para compilar y probar, ponemos valores nominales (ej. 60.0 grados). 
+    // Luego debéis mapear estas dos variables a vuestras lecturas reales.
+    float temp_inv_rl = 60.0f; 
+    float temp_inv_rr = 60.0f;
+    float temp_limit = 75.0f; // Empieza a recortar seriamente a los 75 grados
+    
+    // Función sigmoide: Cae de 1.0 a 0.0 de forma curva y suave.
+    // Factor 0.5f regula la agresividad de la caída.
+    float derate_rl = 1.0f - gp_sigmoid((temp_inv_rl - temp_limit) * 0.5f);
+    float derate_rr = 1.0f - gp_sigmoid((temp_inv_rr - temp_limit) * 0.5f);
+    
+    // Aplicamos el factor de protección a la potencia del inversor
+    t_ub_power[GP_RL] *= derate_rl;
+    t_ub_power[GP_RR] *= derate_rr;
+    // ------------------------------------------
+
     float t_ub[4];
     for (int i = 0; i < 4; i++) {
         t_ub[i] = GP_MIN(t_ub_friction[i], t_ub_power[i]);
     }
+
+    // --- ESCUDO DE FRICCIÓN (Friction Budgeting) ---
+    // Si la pista no puede dar más aceleración total, ahogamos la demanda
 
     // Escudo de Fricción (Friction Budgeting)
     float max_sum = t_ub[GP_RL] + t_ub[GP_RR];

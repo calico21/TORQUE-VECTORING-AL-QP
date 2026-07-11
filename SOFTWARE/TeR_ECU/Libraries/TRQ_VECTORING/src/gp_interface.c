@@ -8,6 +8,10 @@
 #include "TeR_CAN.h"      // Para leer la estructura global del monoplaza
 #include "stm32f4xx_hal.h" // Necesario para acceder a los registros DWT y CoreDebug
 
+// IDs propuestos para el Bus CAN
+#define CAN_ID_TV_DYNAMICS   0x100
+#define CAN_ID_TC_ESTIMATOR  0x101
+
 #define GP_DEG2RAD  0.0174532925f
 #define GP_KMH2MS   0.2777777778f
 #define GP_RPM2RADS 0.1047197551f
@@ -74,4 +78,59 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     gp_execution_time_us = (float)execution_ticks / 180.0f; 
 
     return out_map;
+}
+
+#include <stdint.h>
+#include "gp_torque_vectoring.h"
+
+void gp_pack_telemetry(const tv_state_t* state, uint8_t can_dyn[8], uint8_t can_tc[8], uint8_t can_act[8]) {
+    
+    // --- TRAMA 1: Dinámica y KKT (ID: 0x100) ---
+    // vy_est (Deriva Lateral) -> Escala * 100
+    int16_t vy_pack = (int16_t)(state->vy_est * 100.0f);
+    can_dyn[0] = (vy_pack >> 8) & 0xFF; can_dyn[1] = vy_pack & 0xFF;
+    
+    // Integral del Yaw Rate (wz_int) -> Escala * 100
+    int16_t wz_int_pack = (int16_t)(state->wz_int * 100.0f);
+    can_dyn[2] = (wz_int_pack >> 8) & 0xFF; can_dyn[3] = wz_int_pack & 0xFF;
+
+    // Kappa Target RL (RLS + Gradient Ascent) -> Escala * 10000
+    uint16_t kopt_rl = (uint16_t)(state->tc.kappa_opt[GP_RL] * 10000.0f);
+    can_dyn[4] = (kopt_rl >> 8) & 0xFF; can_dyn[5] = kopt_rl & 0xFF;
+
+    // Kappa Target RR -> Escala * 10000
+    uint16_t kopt_rr = (uint16_t)(state->tc.kappa_opt[GP_RR] * 10000.0f);
+    can_dyn[6] = (kopt_rr >> 8) & 0xFF; can_dyn[7] = kopt_rr & 0xFF;
+
+    // --- TRAMA 2: Observador RLS Pacejka (ID: 0x101) ---
+    // Theta RL (Pendiente) -> Escala / 10
+    int16_t theta_rl = (int16_t)(state->tc.rls_theta[GP_RL] / 10.0f);
+    can_tc[0] = (theta_rl >> 8) & 0xFF; can_tc[1] = theta_rl & 0xFF;
+
+    // Theta RR -> Escala / 10
+    int16_t theta_rr = (int16_t)(state->tc.rls_theta[GP_RR] / 10.0f);
+    can_tc[2] = (theta_rr >> 8) & 0xFF; can_tc[3] = theta_rr & 0xFF;
+
+    // Mu RL y RR -> Escala * 1000
+    uint16_t mu_rl = (uint16_t)(state->tc.mu_surface[0] * 1000.0f);
+    can_tc[4] = (mu_rl >> 8) & 0xFF; can_tc[5] = mu_rl & 0xFF;
+    uint16_t mu_rr = (uint16_t)(state->tc.mu_surface[1] * 1000.0f);
+    can_tc[6] = (mu_rr >> 8) & 0xFF; can_tc[7] = mu_rr & 0xFF;
+
+    // --- TRAMA 3: Actuadores Físicos (ID: 0x102) ---
+    // Torque Comando RL (Lo que va al inversor) -> Escala * 10
+    int16_t trq_rl = (int16_t)(state->t_out_prev[GP_RL] * 10.0f);
+    can_act[0] = (trq_rl >> 8) & 0xFF; can_act[1] = trq_rl & 0xFF;
+
+    // Torque Comando RR -> Escala * 10
+    int16_t trq_rr = (int16_t)(state->t_out_prev[GP_RR] * 10.0f);
+    can_act[2] = (trq_rr >> 8) & 0xFF; can_act[3] = trq_rr & 0xFF;
+
+    // Slip Actual Filtrado RL -> Escala * 10000
+    uint16_t kfilt_rl = (uint16_t)(state->tc.kappa_filt[GP_RL] * 10000.0f);
+    can_act[4] = (kfilt_rl >> 8) & 0xFF; can_act[5] = kfilt_rl & 0xFF;
+
+    // Slip Actual Filtrado RR -> Escala * 10000
+    uint16_t kfilt_rr = (uint16_t)(state->tc.kappa_filt[GP_RR] * 10000.0f);
+    can_act[6] = (kfilt_rr >> 8) & 0xFF; can_act[7] = kfilt_rr & 0xFF;
 }
