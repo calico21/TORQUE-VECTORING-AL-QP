@@ -23,6 +23,8 @@ typedef struct {
     float t_qp_prev[4];   // Última solución del solver (Warm-start)
     float t_out_prev[4];  // Último torque aplicado (tras rate limit)
     tc_state_t tc;        // Estado interno del Control de Tracción
+    float alpha_qp;  
+    float lam_prev;
 } tv_state_t;
 
 // ── Prototipos de funciones ─────────────────────────────────

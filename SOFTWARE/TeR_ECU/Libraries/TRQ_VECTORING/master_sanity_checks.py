@@ -17,7 +17,9 @@ class TVState(ctypes.Structure):
                 ("delta_prev", ctypes.c_float),
                 ("t_qp_prev", ctypes.c_float * 4),
                 ("t_out_prev", ctypes.c_float * 4),
-                ("tc", TCState)]
+                ("tc", TCState),
+                ("alpha_qp", ctypes.c_float),  # <--- AÑADIDO
+                ("lam_prev", ctypes.c_float)]  # <--- AÑADIDO
 
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')
@@ -25,18 +27,22 @@ except OSError:
     print("Error: No se encuentra gp_core.so. Compila primero con gcc -shared...")
     exit(1)
 
-# Firma actualizada (Añadido el float del freno antes del dt)
+# Firma actualizada para gp_tv_step
 gp_lib.gp_tv_step.argtypes = [
     ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float,
     ctypes.c_float, ctypes.c_float, ctypes.POINTER(ctypes.c_float * 4), 
-    ctypes.c_float, ctypes.c_float, # <--- brake_norm, dt
+    ctypes.c_float, ctypes.c_float, 
     ctypes.POINTER(TVState), ctypes.POINTER(ctypes.c_float * 4)
 ]
 
+# NUEVO: Firma para gp_tv_init
+gp_lib.gp_tv_init.argtypes = [ctypes.POINTER(TVState)]
+
 def run_scenario(time_array, input_generator):
     state = TVState()
-    ctypes.memset(ctypes.byref(state), 0, ctypes.sizeof(TVState))
-    state.tc.mu_surface = 1.5 
+    # ELIMINAR: ctypes.memset(ctypes.byref(state), 0, ctypes.sizeof(TVState))
+    gp_lib.gp_tv_init(ctypes.byref(state)) # <--- AÑADIDO: Llama a C directamente
+    state.tc.mu_surface = 1.5
     
     t_rl_log, t_rr_log, tv_diff_log = [], [], []
     
@@ -212,10 +218,11 @@ class LegacyTV:
         return nom - (d_torque / 2.0), nom + (d_torque / 2.0)
 
 def run_comparison(time_array, input_generator):
-    """Ejecuta ambos sistemas en paralelo y extrae las métricas comparativas"""
     state_new = TVState()
-    ctypes.memset(ctypes.byref(state_new), 0, ctypes.sizeof(TVState))
+    # ELIMINAR: ctypes.memset(ctypes.byref(state_new), 0, ctypes.sizeof(TVState))
+    gp_lib.gp_tv_init(ctypes.byref(state_new)) # <--- AÑADIDO: Llama a C directamente
     state_new.tc.mu_surface = 1.5 
+    # ...
     legacy_tv = LegacyTV()
     
     log = {'new_rl': [], 'new_rr': [], 'new_diff': [], 

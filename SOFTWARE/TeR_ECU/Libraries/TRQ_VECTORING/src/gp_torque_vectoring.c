@@ -33,6 +33,13 @@ void gp_tv_init(tv_state_t* state) {
         state->t_out_prev[i] = 0.0f;
     }
     gp_tc_init(&state->tc);
+
+    // --- CÁLCULO REAL DE ALPHA ---
+    float h = GP_W_REG + GP_W_SMOOTH;
+    float a_sq = 2.0f / (GP_R_WHEEL * GP_R_WHEEL);
+    state->alpha_qp = 1.0f / (h + GP_RHO_AL * a_sq); 
+
+    state->lam_prev = 0.0f; 
 }
 
 void gp_tv_step(
@@ -88,7 +95,7 @@ void gp_tv_step(
     
     // 6. Puerta de Autoridad y Rescate de Contravolante
     float os_gate = 1.0f - gp_sigmoid((fabsf(wz) - fabsf(wz_ref) - 0.2f) * 10.0f);
-    float counter_steer_factor = (delta * wz < -0.05f) ? 0.0f : 1.0f;
+    float counter_steer_factor = 1.0f - gp_sigmoid(-(delta * wz + 0.05f) * 40.0f);     /* Filtro continuo de contravolante. Cae suavemente a 0 cuando delta * wz cruza -0.05 */
     
     float ff_mz = kd * delta_dot * (vx_safe / 10.0f);
     float fb_mz = kp * wz_err + ki * state->wz_int;
@@ -113,7 +120,18 @@ void gp_tv_step(
 
     float qp_result[4];
     float qp_residual;
-    gp_qp_solve_rwd(t_nominal, state->t_out_prev, fx_driver, t_lb, t_ub, qp_result, &qp_residual);
+    // NUEVA LLAMADA (9 argumentos con el pre-cálculo y el warm-start inyectados)
+    gp_qp_solve_rwd(
+        t_nominal, 
+        state->t_out_prev, 
+        fx_driver, 
+        t_lb, 
+        t_ub, 
+        state->alpha_qp,   // <--- Argumento 6 (Nuevo)
+        &state->lam_prev,  // <--- Argumento 7 (Nuevo)
+        qp_result,         // <--- Antes era el 6, ahora es el 8
+        &qp_residual       // <--- Antes era el 7, ahora es el 9
+    );
     
     // 9. Rate Limiting (FIX: Eliminado el EMA param maximizar Slew Rate)
     float max_delta_t = GP_TV_RATE_LIMIT * dt;

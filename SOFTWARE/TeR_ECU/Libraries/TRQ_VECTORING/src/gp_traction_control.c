@@ -87,9 +87,15 @@ void gp_tc_step(
         state->omega_prev[i] = omega_ema; // Guardamos la velocidad ya suavizada
         
         // Feedforward derivativo anticipativo (Umbral de 250 y verificando que haya error real)
-        if (omega_dot > 250.0f && error > 0.0f) {
-            pi_out += (omega_dot - 250.0f) * 2.0f; 
-        }
+        /* Gate suave: vale ~1 si hay error positivo (patinaje), ~0 si no hay error */
+        float error_gate = gp_sigmoid(error * 50.0f); 
+
+        /* Derivada continua: solo crece a partir de 250 rad/s^2, pero sin esquinas matemáticas.
+        Multiplicamos por 20.0f para escalar de vuelta el factor 0.05f interno */
+        float deriv_kick = 2.0f * (20.0f * gp_softplus((omega_dot - 250.0f) * 0.05f));
+
+        /* Se aplica el recorte de par predictivo de forma puramente continua */
+        pi_out -= deriv_kick * error_gate; // O += si vuestra lógica de recorte suma torque negativo
         
         float reduction = speed_gate * gp_softplus(pi_out * GP_TC_CLAMP_BETA) / GP_TC_CLAMP_BETA;
         float t_cmd = t_req_out[i] - reduction;

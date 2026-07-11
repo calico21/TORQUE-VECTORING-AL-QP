@@ -26,6 +26,8 @@ void gp_qp_solve_rwd(
     float fx_driver,
     const float t_lb[4],
     const float t_ub[4],
+    float alpha_qp,       // <--- NUEVO: Constante pre-calculada
+    float* lam_prev_ptr,  // <--- NUEVO: Puntero al multiplicador dual
     float t_out[4],
     float* qp_residual
 );
