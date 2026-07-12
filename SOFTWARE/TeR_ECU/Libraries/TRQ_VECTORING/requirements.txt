@@ -1,4 +1,6 @@
 rich
 python-can
+cantools
 PyQtGraph
+PyQt5
 numpy

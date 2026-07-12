@@ -230,7 +230,9 @@ def generate_report(scenarios, titles, filename, super_title, time_steps):
         ax.legend(loc='best')
     
     plt.tight_layout()
-    output_path = os.path.join('output', filename)
+    out_dir = os.path.join('output', 'graphs')
+    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(out_dir, filename)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"✅ Generado: {output_path}")
     plt.close()
@@ -322,7 +324,9 @@ def generate_comparison_report(scenarios, titles, filename, super_title, time_st
         ax.legend(loc='best', fontsize=9)
     
     plt.tight_layout()
-    output_path = os.path.join('output', filename)
+    out_dir = os.path.join('output', 'graphs')
+    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(out_dir, filename)
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"✅ Generated: {output_path}")
     plt.close()
@@ -603,7 +607,7 @@ def scenario_limit_slalom(t):
 # 6. MAIN EXECUTION
 # =====================================================================
 if __name__ == "__main__":
-    os.makedirs('output', exist_ok=True)
+    os.makedirs(os.path.join('output', 'graphs'), exist_ok=True)
     time_steps = np.linspace(0, 3.0, 600)
     
     print("\nStarting Sanity Checks Battery (Master V5.2)...")
