@@ -67,7 +67,6 @@ void gp_tc_step(
     float fx_rl = (t_req_out[GP_RL] - GP_I_WHEEL_EST * omega_dot_rl) / GP_R_WHEEL;
     float fx_rr = (t_req_out[GP_RR] - GP_I_WHEEL_EST * omega_dot_rr) / GP_R_WHEEL;
     
-    // Array auxiliar para iterar fácil
     float fx_wheels[4] = {0.0f};
     fx_wheels[GP_RL] = fx_rl;
     fx_wheels[GP_RR] = fx_rr;
@@ -133,7 +132,7 @@ void gp_tc_step(
             state->rls_P[i] = GP_CLAMP((P - K * phi * P) / lambda, 10.0f, 10000.0f);
         }
         
-        // --- 2. GRADIENT ASCENT + SECANTE (Corregida) ---
+        // --- 2. GRADIENT ASCENT + SECANTE ---
         float dtheta = state->rls_theta[i] - state->theta_prev[i];
         
         // Usamos el prev_k rescatado para calcular el intercepto real
@@ -154,7 +153,6 @@ void gp_tc_step(
         // Target Híbrido: 50% Analítico (Seguridad) + 50% RLS (Adaptativo en vivo)
         float kappa_analytical = gp_tc_kappa_star(fz[i], state->mu_surface[w]) * cs_factor;
         float kappa_star = 0.5f * kappa_analytical + 0.5f * state->kappa_opt[i];
-        // -------------------------------------------------------------
 
         float error = state->kappa_filt[i] - kappa_star; 
         

@@ -37,7 +37,7 @@ typedef struct {
     // Estados del observador RLS
     float rls_P[4];        
     float rls_theta[4];    
-    float theta_prev[4];   // <-- Debe estar aquí
+    float theta_prev[4];   
     float kappa_prev[4];   
     float fx_prev[4];      
     float kappa_opt[4];    

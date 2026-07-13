@@ -94,7 +94,7 @@ except ImportError:
 # =====================================================================
 # CONFIGURACIÓN
 # =====================================================================
-USE_REAL_CAN = False          # True en el garaje/pista con el USB-CAN puesto
+USE_REAL_CAN = True          # True en el garaje/pista con el USB-CAN puesto
 CAN_BUSTYPE = "pcan"
 CAN_CHANNEL = "PCAN_USBBUS1"
 CAN_BITRATE = 500000
@@ -878,7 +878,9 @@ class ChassisTopDown(QtWidgets.QWidget):
     """ Renderizado del chasis visto desde arriba con vectores de fuerza """
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(250, 400)
+        # SOLUCIÓN 1: Reducimos el alto mínimo de 400 a 250 px. 
+        # Esto le devuelve automáticamente 150 píxeles de alto al Verificador de Sensores.
+        self.setMinimumSize(250, 250)
 
     def update_data(self, hub):
         self.vy = hub.latest.get("vy_est", 0)
@@ -896,8 +898,10 @@ class ChassisTopDown(QtWidgets.QWidget):
         
         p.fillRect(0, 0, w, h, QColor("#111111"))
         
-        # Centro
-        cx, cy = w // 2, h // 2
+        # SOLUCIÓN 2: Modificamos 'cy' aplicando un offset negativo (-25 píxeles) 
+        # para desplazar el dibujo del monoplaza y todos sus vectores hacia ARRIBA.
+        cx = w // 2
+        cy = (h // 2) - 25
         car_w, car_h = 60, 160
         
         # Dibujar Chasis
@@ -930,8 +934,7 @@ class ChassisTopDown(QtWidgets.QWidget):
         p.setPen(QPen(QColor("#FF3333"), 3))
         p.drawLine(cx, cy, cx + int(self.vy * 40), cy)
 
-        # Vectores de Fuerza Lateral por eje (proxy: ay repartido delante/detrás,
-        # no hay Fy por rueda medida directamente, solo estimada en gp_vehicle_model.c)
+        # Vectores de Fuerza Lateral por eje
         fy_len = int(getattr(self, "ay", 0.0) * 3.0)
         p.setPen(QPen(QColor("#00FFAA"), 3))
         p.drawLine(cx - car_w // 2, cy - car_h // 2 + 20, cx - car_w // 2 - fy_len, cy - car_h // 2 + 20)

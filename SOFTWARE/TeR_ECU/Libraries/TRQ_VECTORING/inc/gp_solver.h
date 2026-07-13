@@ -16,8 +16,8 @@ void gp_qp_solve_rwd(
     float fx_driver,
     const float t_lb[4],
     const float t_ub[4],
-    float alpha_qp,       // <-- Reintegrado
-    float* lam_prev_ptr,  // <-- Reintegrado
+    float alpha_qp,       
+    float* lam_prev_ptr,  
     float t_out[4],
     float* qp_residual
 );

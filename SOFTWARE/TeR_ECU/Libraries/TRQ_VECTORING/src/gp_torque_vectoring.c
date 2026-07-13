@@ -100,10 +100,7 @@ void gp_tv_step(
     gp_friction_ellipse_t_ub(fz_est, fy_est, mu_avg, t_ub_friction);
     gp_power_limited_t_ub(omega, t_ub_power);
     
-    // --- NUEVO: DERATING TÉRMICO (Soft-Cut) ---
-    // Simulación: Asumimos que extraes las temps de tu bus CAN (TeR.invInfo.left_motor_temp)
     // Para compilar y probar, ponemos valores nominales (ej. 60.0 grados). 
-    // Luego debéis mapear estas dos variables a vuestras lecturas reales.
     float temp_inv_rl = 60.0f; 
     float temp_inv_rr = 60.0f;
     float temp_limit = 75.0f; // Empieza a recortar seriamente a los 75 grados
@@ -116,7 +113,6 @@ void gp_tv_step(
     // Aplicamos el factor de protección a la potencia del inversor
     t_ub_power[GP_RL] *= derate_rl;
     t_ub_power[GP_RR] *= derate_rr;
-    // ------------------------------------------
 
     float t_ub[4];
     for (int i = 0; i < 4; i++) {
@@ -126,7 +122,6 @@ void gp_tv_step(
     // --- ESCUDO DE FRICCIÓN (Friction Budgeting) ---
     // Si la pista no puede dar más aceleración total, ahogamos la demanda
 
-    // Escudo de Fricción (Friction Budgeting)
     float max_sum = t_ub[GP_RL] + t_ub[GP_RR];
     float req_sum = fx_driver * GP_R_WHEEL;
     if (req_sum > max_sum) {
@@ -139,7 +134,6 @@ void gp_tv_step(
     float qp_result[4];
     float qp_residual;
     
-    // Llamada restaurada a 9 argumentos
     gp_qp_solve_rwd(
         t_nominal, 
         state->t_out_prev, 

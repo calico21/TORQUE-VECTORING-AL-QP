@@ -17,8 +17,8 @@ typedef struct {
     float t_out_prev[4];
     tc_state_t tc;
     float vy_est;     
-    float alpha_qp;   // <-- Debe estar aquí
-    float lam_prev;   // <-- Debe estar aquí
+    float alpha_qp;   
+    float lam_prev;  
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);
