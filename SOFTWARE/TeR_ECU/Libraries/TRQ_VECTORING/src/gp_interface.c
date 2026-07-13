@@ -53,10 +53,8 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     float ax = IMU.a_x;             
 
     float omega[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    /* Descomentar cuando la variable CAN esté definida:
-    omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS; 
+    omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
     omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
-    */
 
     // Asumimos que bpps viene en 0-255 al igual que el acelerador
     float brake_norm = (float)TeR.bpps.bpps / 255.0f;

@@ -31,8 +31,9 @@ class TVState(ctypes.Structure):
         ("t_out_prev", ctypes.c_float * 4),
         ("tc", TCState),
         ("vy_est", ctypes.c_float),
-        ("alpha_qp", ctypes.c_float),  # <-- Crítico para el AL-QP Iterativo
-        ("lam_prev", ctypes.c_float),  # <-- Crítico para el AL-QP Iterativo
+        ("alpha_qp", ctypes.c_float),
+        ("lam_prev", ctypes.c_float),
+        ("mz_sat_ratio", ctypes.c_float),  # <-- Anti-windup, debe coincidir 1:1 con tv_state_t
     ]
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')

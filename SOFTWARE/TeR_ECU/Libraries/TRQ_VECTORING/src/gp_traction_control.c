@@ -14,7 +14,7 @@ void gp_tc_init(tc_state_t* state) {
         // Inicialización del Estimador RLS
         state->rls_P[i] = 1000.0f;       // Alta incertidumbre inicial
         state->rls_theta[i] = 30000.0f;  
-        state->theta_prev[i] = 30000.0f; // <--- NUEVA LÍNEA
+        state->theta_prev[i] = 30000.0f; 
         state->kappa_prev[i] = 0.0f;
         state->fx_prev[i] = 0.0f;
         state->kappa_opt[i] = 0.12f;     // Slip target nominal inicial (12%)

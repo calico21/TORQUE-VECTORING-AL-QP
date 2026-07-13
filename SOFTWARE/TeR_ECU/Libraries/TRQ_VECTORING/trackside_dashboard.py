@@ -2,8 +2,6 @@
 Tecnun eRacing | TeR Trackside Telemetry Dashboard v3.0
 =========================================================
 
-Sustituye/mejora a hil_telemetry_gui.py. Cambios clave:
-
   1. Selector de canales (panel izquierdo, agrupado por subsistema + presets)
      -> puedes elegir cualquier subconjunto de ~35 señales sin saturar la UI.
   2. Cobertura completa de sensores: AL-QP/TV, TC/RLS-Pacejka, velocidad y
