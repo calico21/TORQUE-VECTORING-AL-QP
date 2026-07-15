@@ -41,7 +41,8 @@ void gp_tv_init(tv_state_t* state) {
 
 void gp_tv_step(
     float fx_driver, float delta, float vx, float vy, float wz, 
-    float ay, float ax, const float omega[4], float brake_norm, float dt, 
+    float ay, float ax, const float omega[4], float brake_norm, 
+    float temp_inv_rl, float temp_inv_rr, float dt, 
     tv_state_t* state, float t_cmd_out[4]
 ) {
     if (vx < 1.0f && brake_norm > 0.5f && fx_driver > 500.0f) {
@@ -119,8 +120,6 @@ void gp_tv_step(
     
     // --- DERATING TÉRMICO (Soft-Cut) ---
     // Wired a TeR.invInfo, actualizado cada 5ms en TeR_STATEMACHINE.c::permaTask()
-    float temp_inv_rl = (float)TeR.invInfo.left_motor_temp;
-    float temp_inv_rr = (float)TeR.invInfo.right_motor_temp;
     float temp_limit = 75.0f; // Empieza a recortar seriamente a los 75 grados
     
     // Función sigmoide: Cae de 1.0 a 0.0 de forma curva y suave.
@@ -152,12 +151,14 @@ void gp_tv_step(
     float qp_result[4];
     float qp_residual;
 
-    gp_qp_solve_rwd_closedform(
+    gp_qp_solve_rwd(
         t_nominal,
-        state->t_out_prev,
+        state->t_qp_prev,
         fx_driver,
         t_lb,
         t_ub,
+        state->alpha_qp,       // <-- EL FACTOR DE SUAVIDAD
+        &state->lam_prev,      // <-- LA MEMORIA DEL MULTIPLICADOR DE LAGRANGE
         qp_result,
         &qp_residual
     );
@@ -177,11 +178,14 @@ void gp_tv_step(
     
     float max_delta_t = GP_TV_RATE_LIMIT * dt;
     for (int i = 0; i < 4; i++) {
-        state->t_qp_prev[i] = qp_result[i];
-        float delta_t = GP_CLAMP(qp_result[i] - state->t_out_prev[i], -max_delta_t, max_delta_t);
-        t_cmd_out[i] = state->t_out_prev[i] + delta_t;
+        // Límite de tasa sobre la curva limpia del AL-QP
+        float delta_t = GP_CLAMP(qp_result[i] - state->t_qp_prev[i], -max_delta_t, max_delta_t);
+        float tv_final = state->t_qp_prev[i] + delta_t;
+        
+        state->t_qp_prev[i] = tv_final; // TV guarda su estado puro
+        t_cmd_out[i] = tv_final;        // Se envía al TC para el recorte
     }
-    
+
     gp_tc_step(t_cmd_out, omega, vx, vy, wz, fz_est, dt, &state->tc);
     
     for (int i = 0; i < 4; i++) {

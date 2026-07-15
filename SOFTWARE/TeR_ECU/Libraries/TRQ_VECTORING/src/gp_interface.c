@@ -56,8 +56,10 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
     omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
 
-    // Asumimos que bpps viene en 0-255 al igual que el acelerador
-    float brake_norm = (float)TeR.bpps.bpps / 255.0f;
+    // Lectura del Freno (Ahora en Bares de presión)
+    #define MAX_BRAKE_PRESSURE_BAR 30.0f 
+    
+    float brake_norm = (float)TeR.bpps.bpps / MAX_BRAKE_PRESSURE_BAR;
     brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
 
     // Ejecución del núcleo matemático

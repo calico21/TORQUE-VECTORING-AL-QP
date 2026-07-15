@@ -45,7 +45,7 @@ except OSError:
 gp_lib.gp_tv_step.argtypes = [
     ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float,
     ctypes.c_float, ctypes.c_float, ctypes.POINTER(ctypes.c_float * 4), 
-    ctypes.c_float, ctypes.c_float, 
+    ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, 
     ctypes.POINTER(TVState), ctypes.POINTER(ctypes.c_float * 4)
 ]
 
@@ -69,7 +69,7 @@ def run_scenario(time_array, input_generator):
         t_out_c = (ctypes.c_float * 4)()
         
         gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, 
-                          omega_c, brake, 0.005, ctypes.byref(state), t_out_c)
+                          omega_c, brake, 60.0, 60.0, 0.005, ctypes.byref(state), t_out_c)
         
         t_rl_log.append(t_out_c[2])
         t_rr_log.append(t_out_c[3])
@@ -279,7 +279,7 @@ def run_comparison(time_array, input_generator):
         # Sistema Nuevo
         omega_c = (ctypes.c_float * 4)(*omega)
         t_out_c = (ctypes.c_float * 4)()
-        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake, 0.005, ctypes.byref(state_new), t_out_c)
+        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake, 60.0, 60.0, 0.005, ctypes.byref(state_new), t_out_c)
         
         # Sistema Antiguo
         old_rl, old_rr = legacy_tv.step(fx, delta, vx, wz, 0.005)
