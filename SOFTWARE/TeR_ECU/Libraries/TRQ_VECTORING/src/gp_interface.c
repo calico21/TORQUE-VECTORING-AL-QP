@@ -74,8 +74,8 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     uint32_t end_ticks = DWT->CYCCNT;
     uint32_t execution_ticks = end_ticks - start_ticks;
     
-    // STM32F446RE corre a 180 MHz (1 tick = 1/180 us)
-    gp_execution_time_us = (float)execution_ticks / 180.0f; 
+    // CORRECCIÓN: STM32F405VGTx de la ECU de producción corre a 168 MHz (1 tick = 1/168 us)
+    gp_execution_time_us = (float)execution_ticks / 168.0f; 
 
     return out_map;
 }
