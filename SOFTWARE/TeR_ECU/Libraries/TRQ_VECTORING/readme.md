@@ -211,7 +211,7 @@ Every phase below runs through the identical ctypes SIL harness against the exac
 
 #### Phase II — Edge-Case Robustness
 
-![Phase 2 Edge Cases](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase2_edge_cases.png)
+![Phase 2 Edge Cases](output/graphs/sanity_phase2_edge_cases.png)
 
 | Test | What it stresses | Result |
 |---|---|---|
@@ -226,7 +226,7 @@ Every phase below runs through the identical ctypes SIL harness against the exac
 
 #### Phase III — High-Performance Transient Dynamics
 
-![Phase 3 Performance](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase3_performance.png)
+![Phase 3 Performance](output/graphs/sanity_phase3_performance.png)
 
 | Test | What it stresses | Result |
 |---|---|---|
@@ -241,7 +241,7 @@ Every phase below runs through the identical ctypes SIL harness against the exac
 
 #### Phase IV — Advanced Dynamics & Envelope Expansion
 
-![Phase 4 Advanced](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase4_advanced.png)
+![Phase 4 Advanced](output/graphs/sanity_phase4_advanced.png)
 
 | Test | What it stresses | Result |
 |---|---|---|
@@ -259,23 +259,23 @@ Every phase below runs through the identical ctypes SIL harness against the exac
 These five phases run identical inputs through both controllers side-by-side. The legacy PD is **hard-capped at ±40 Nm** with known integral windup; the AL-QP has no such artificial ceiling — only physics-derived bounds.
 
 **Phase V — Lateral Dynamics & Handling**
-![Phase 5 Dogfight Lateral](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase5_dogfight_lateral.png)
+![Phase 5 Dogfight Lateral](output/graphs/sanity_phase5_dogfight_lateral.png)
 Slalom agility swings to **−98 Nm and +110 Nm** where the PD is flatlined at ±40 Nm; the friction-ellipse test shows AL-QP diving to **−115 Nm** as lateral G saturates, tracking the *real* limit instead of an arbitrary cap. The solver-stability panel shows AL-QP settling smoothly while the PD's fixed cap forces it into a repeating square-wave — visible integral windup with every cycle.
 
 **Phase VI — Longitudinal Traction & Power**
-![Phase 6 Dogfight Traction](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase6_dogfight_traction.png)
+![Phase 6 Dogfight Traction](output/graphs/sanity_phase6_dogfight_traction.png)
 Launch control shows AL-QP correctly holding pre-tension while PD blindly commands full torque immediately. The aero-downforce panel is the standout: PD's blind request sits pinned at ~510 Nm regardless of conditions, while AL-QP tracks the *physically achievable* envelope — this is the difference between a request and a **deliverable** torque.
 
 **Phase VII — Signal Filtering & Robustness**
-![Phase 7 Dogfight Robustness](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase7_dogfight_robustness.png)
+![Phase 7 Dogfight Robustness](output/graphs/sanity_phase7_dogfight_robustness.png)
 The CAN-glitch panel shows the PD's unfiltered line following the spike almost exactly, while AL-QP's filtered output barely deviates. Trail-braking and lift-off panels show the PD instantly slamming to its bound (a step function) while AL-QP produces a smooth, physically realizable torque profile — directly protecting driveline hardware.
 
 **Phase VIII — FSAE Dynamic Events**
-![Phase 8 Dogfight Dynamics](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase8_dogfight_dynamics.png)
+![Phase 8 Dogfight Dynamics](output/graphs/sanity_phase8_dogfight_dynamics.png)
 On the 75 m acceleration event both controllers correctly agree (zero delta — no vectoring needed in a straight line, a good sanity cross-check). On the endurance hairpin and autocross sweeper, AL-QP reaches **−160 Nm and −290 Nm respectively** — 4–7× the PD's ±40 Nm ceiling — while remaining smooth and bounded, exploiting the mechanical and aero grip that's actually on the table.
 
 **Phase IX — Hardware Limits & Degradation**
-![Phase 9 Hardware Limits](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase9_dogfight_limits.png)
+![Phase 9 Hardware Limits](output/graphs/sanity_phase9_dogfight_limits.png)
 Thermal-degradation and BMS-derating tests show AL-QP **actively tracking the live thermal/power envelope** — torque decays exactly in step with the derating curve rather than continuing to demand torque the inverter can't deliver (which is what the flat PD line does). The asymmetric-tire-wear test shows AL-QP adapting its output as effective grip decays over the run, and the ISO sine-with-dwell evasive maneuver is tracked cleanly through the dwell without oscillation.
 
 **Conclusion across Phases V–IX:** this is the single most award-relevant result in the repository. It is not a claim of "better tuning" — it is direct plotted proof that the legacy architecture's ±40 Nm ceiling and integral windup are structural ceilings on vehicle performance, and that the AL-QP formulation removes them while simultaneously being smoother, more thermally aware, and more robust to sensor noise.
