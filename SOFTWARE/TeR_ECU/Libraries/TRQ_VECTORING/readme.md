@@ -278,7 +278,7 @@ On the 75 m acceleration event both controllers correctly agree (zero delta — 
 ![Phase 9 Hardware Limits](output/graphs/sanity_phase9_dogfight_limits.png)
 Thermal-degradation and BMS-derating tests show AL-QP **actively tracking the live thermal/power envelope** — torque decays exactly in step with the derating curve rather than continuing to demand torque the inverter can't deliver (which is what the flat PD line does). The asymmetric-tire-wear test shows AL-QP adapting its output as effective grip decays over the run, and the ISO sine-with-dwell evasive maneuver is tracked cleanly through the dwell without oscillation.
 
-**Conclusion across Phases V–IX:** this is the single most award-relevant result in the repository. It is not a claim of "better tuning" — it is direct plotted proof that the legacy architecture's ±40 Nm ceiling and integral windup are structural ceilings on vehicle performance, and that the AL-QP formulation removes them while simultaneously being smoother, more thermally aware, and more robust to sensor noise.
+**Conclusion across Phases V–IX:** It is not a claim of "better tuning" — it is direct plotted proof that the legacy architecture's ±40 Nm ceiling and integral windup are structural ceilings on vehicle performance, and that the AL-QP formulation removes them while simultaneously being smoother, more thermally aware, and more robust to sensor noise.
 
 ---
 
@@ -320,7 +320,7 @@ Across all 11 phases and 28 individual test cases, the AL-QP architecture demons
 - **Active hardware protection** — thermal and BMS derating are tracked and respected in real time rather than discovered as a fault.
 - **Deterministic, jitter-free execution** at 200 Hz on genuinely resource-constrained automotive hardware (168 MHz, malloc-free).
 
-That combination — provably safer *and* provably faster than the system it replaces — is the core argument for the award.
+That combination — provably safer *and* provably faster than the system it replaces.
 
 ---
 
