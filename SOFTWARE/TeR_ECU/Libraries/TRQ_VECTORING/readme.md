@@ -196,7 +196,7 @@ Every phase below runs through the identical ctypes SIL harness against the exac
 
 #### Phase I — Core Physics & Mathematical Integrity
 
-![Phase 1 Core Physics](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase1_core.png)
+![Phase 1 Core Physics](output/graphs/sanity_phase1_core.png)
 
 | Test | What it stresses | Result |
 |---|---|---|
@@ -352,7 +352,7 @@ TORQUE-VECTORING-AL-QP/
 
 <div align="center">
 
-**Team Ter26** · Formula Student
+**Tecnun eRacing** · Formula Student
 *Submitted for the Garrett Powertrains Innovation Award*
 
 </div>
