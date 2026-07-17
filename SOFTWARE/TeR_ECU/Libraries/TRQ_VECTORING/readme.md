@@ -284,7 +284,7 @@ Thermal-degradation and BMS-derating tests show AL-QP **actively tracking the li
 
 #### Phase X — Envelope Expansion (Absolute Performance)
 
-![Phase 10 Envelope Expansion](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase10_envelope_expansion.png)
+![Phase 10 Envelope Expansion](output/graphs/sanity_phase10_envelope_expansion.png)
 
 | Test | What it stresses | Result |
 |---|---|---|
@@ -299,7 +299,7 @@ Thermal-degradation and BMS-derating tests show AL-QP **actively tracking the li
 
 #### Phase XI — Race-Pace Analytics (Ultimate Performance)
 
-![Phase 11 Ultimate Performance](SOFTWARE/TeR_ECU/Libraries/TRQ_VECTORING/output/graphs/sanity_phase11_ultimate_performance.png)
+![Phase 11 Ultimate Performance](output/graphs/sanity_phase11_ultimate_performance.png)
 
 | Test | What it stresses | Result |
 |---|---|---|
@@ -353,6 +353,6 @@ TORQUE-VECTORING-AL-QP/
 <div align="center">
 
 **Tecnun eRacing** · Formula Student
-*Submitted for the Garrett Powertrains Innovation Award*
+*Submitted for the Garrett Powertrains Innovation Award - Alex Revilla*
 
 </div>
