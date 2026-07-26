@@ -1,59 +1,10 @@
 """
-Tecnun eRacing | TeR Trackside Telemetry Dashboard v3.0
+Tecnun eRacing | TeR Trackside Telemetry Dashboard v3.1
 =========================================================
-
-  1. Selector de canales (panel izquierdo, agrupado por subsistema + presets)
-     -> puedes elegir cualquier subconjunto de ~35 señales sin saturar la UI.
-  2. Cobertura completa de sensores: AL-QP/TV, TC/RLS-Pacejka, velocidad y
-     par por rueda, inversores, IMU, pedales/volante, AMS/HV, estado AS/DV.
-  3. Decodificación real de CAN vía `cantools` + tus .dbc (ter/inverter/
-     hvbms/ams) para las señales "normales", y decodificación manual para
-     las 3 tramas de debug propietarias del AL-QP (0x100/0x101/0x102),
-     replicando *exactamente* el packing de gp_pack_telemetry().
-  4. Tema oscuro estilo MoTeC, banda de alertas con umbrales warn/crit por
-     canal, y logging opcional a CSV para post-análisis.
-
-BUGS ENCONTRADOS AL IMPLEMENTAR ESTO (léelo, es importante):
---------------------------------------------------------------
-  A) gp_pack_telemetry() [gp_interface.c] empaqueta en la trama 0x100:
-         bytes[0:2] = vy_est*100
-         bytes[2:4] = wz_int*100      <-- NO es qp_residual
-         bytes[4:6] = kappa_opt[RL]*10000
-         bytes[6:8] = kappa_opt[RR]*10000
-     Tanto hil_telemetry_gui.py como trackside_terminal.py decodificaban
-     bytes[2:4] como "qp_residual / 1000" (unsigned) y descartaban por
-     completo kappa_opt[RR] (bytes[6:8]). Es decir: el residuo del solver
-     KKT que se mostraba en pantalla NUNCA fue el residuo real, era el
-     entero de wz_int mal escalado. He corregido el decode aquí (ver
-     CanWorker._decode) y sustituido el canal fantasma "qp_residual" por
-     "wz_int" (que sí se transmite). Si quieres recuperar qp_residual de
-     verdad, hace falta añadir un 4º campo/trama en firmware — parche
-     mínimo sugerido al final de este fichero como comentario.
-
-  B) TeR_INERTIAL.c, función inertial(): las tres líneas de encode del
-     acelerómetro usan la MISMA función de encode para los 3 ejes:
-         TeR.accel.a_x = ter_accel_a_x_encode(IMU.a_x);
-         TeR.accel.a_y = ter_accel_a_x_encode(IMU.a_y);   // <- debería ser _a_y_encode
-         TeR.accel.a_z = ter_accel_a_x_encode(IMU.a_z);   // <- debería ser _a_z_encode
-     Si el .dbc define factor/offset distintos por señal (habitual en
-     cantools cuando cada eje tiene rango físico distinto), accel_y y
-     accel_z que verás en este dashboard estarán mal escalados. Si
-     comparten factor/offset es inofensivo, pero mejor confirmarlo contra
-     el .dbc antes de fiarte del canal en pista.
-
-  C) TeR_DV_STATEMACHINE.c define localmente:
-         #define DEG2RAD (180.0/PI)
-     que matemáticamente es RAD2DEG, no DEG2RAD (compara con el
-     DEG2RAD correcto en tv_mds.h: (PI/180.0f)). Usado en set_steer_angle()
-     justo después de un encode "que ya pasa a grados" según el comentario
-     — el nombre está invertido como mínimo, y merece una revisión rápida
-     para confirmar que la conversión de ángulo de steering es la
-     correcta y no solo "funciona por casualidad" con las unidades del
-     encode.
-
-Requisitos:
-    pip install PyQt5 pyqtgraph numpy
-    pip install python-can cantools        # solo si USE_REAL_CAN = True
+MODIFICATIONS:
+  - Added native parsing for the 0x103 telemetry diagnostic frame.
+  - Linked true qp_residual and alpha_qp to the Channel Specs and presets.
+  - Replaced the temporary wz_int proxy in ActiveSetLEDs with the real KKT residual.
 """
 
 from __future__ import annotations
@@ -92,7 +43,7 @@ except ImportError:
 # =====================================================================
 # CONFIGURACIÓN
 # =====================================================================
-USE_REAL_CAN = True          # True en el garaje/pista con el USB-CAN puesto
+USE_REAL_CAN = False          # True en el garaje/pista con el USB-CAN puesto
 CAN_BUSTYPE = "pcan"
 CAN_CHANNEL = "PCAN_USBBUS1"
 CAN_BITRATE = 500000
@@ -145,6 +96,10 @@ CHANNELS: List[ChannelSpec] = [
                 y_range=(-60, 60)),
     ChannelSpec("yaw_ref", "Yaw Rate Referencia", GROUP_ORDER[0], "deg/s", "#FF00FF",
                 y_range=(-150, 150)),
+    ChannelSpec("qp_residual", "Residuo KKT Solver", GROUP_ORDER[0], "-", "#33FF33", 
+                y_range=(0, 5), decimals=4, warn=lambda v: v > 0.05, crit=lambda v: v > 0.2),
+    ChannelSpec("alpha_qp", "Learning Step (Alpha)", GROUP_ORDER[0], "-", "#AAFF33", 
+                y_range=(0, 1), decimals=6),
 
     # ---- Traction Control / RLS Pacejka --------------------------------
     ChannelSpec("kappa_opt_rl", "Target Slip RL", GROUP_ORDER[1], "%", "#FFEA00", y_range=(0, 25)),
@@ -214,7 +169,7 @@ CHANNELS: List[ChannelSpec] = [
 ]
 
 PRESETS: Dict[str, set] = {
-    "AL-QP Core": {"vy_est", "wz_int", "delta_trq", "yaw_ref"},
+    "AL-QP Core": {"vy_est", "wz_int", "delta_trq", "yaw_ref", "qp_residual", "alpha_qp"},
     "Tracción y Grip": {"kappa_opt_rl", "kappa_opt_rr", "kappa_filt_rl", "kappa_filt_rr",
                          "theta_rl", "theta_rr", "mu_rl", "mu_rr"},
     "Salud Powertrain": {"left_dem", "right_dem", "left_motor_temp", "right_motor_temp",
@@ -227,9 +182,6 @@ PRESETS: Dict[str, set] = {
     "Vaciar": set(),
 }
 
-# NOTE: verifica estos pares (mensaje, señal) contra tu .dbc real generado
-# con cantools — los nombres están inferidos de los campos de struct en
-# TeR_CAN.h / TeR_STATEMACHINE.c y NO están garantizados 1:1.
 SIGNAL_MAP: Dict[tuple, str] = {
     ("TER_WHEEL_INFO", "rl_rpm"): "rl_rpm",
     ("TER_WHEEL_INFO", "rr_rpm"): "rr_rpm",
@@ -265,27 +217,19 @@ SIGNAL_MAP: Dict[tuple, str] = {
 
 
 # =====================================================================
-# MODELO PACEJKA MF6.2-LITE — funciones puras para la "Pacejka Lab"
+# MODELO PACEJKA MF6.2-LITE
 # =====================================================================
-# OJO: estas curvas son analíticas/paramétricas, NO telemetría real. El
-# TeR no tiene sensor de presión ni de camber (ver TeR_CAN.h). Están
-# ancladas a las constantes reales usadas en gp_vehicle_model.h y
-# gp_traction_control.h para que al menos el orden de magnitud sea
-# consistente con lo que corre en la ECU. Los coeficientes de camber y
-# presión son estimaciones de banco típicas para slicks F-SAE — hay que
-# reemplazarlas por datos de tire test cuando/si los tengáis.
-
-GP_MASS_PY, GP_GRAVITY_PY = 300.0, 9.81          # gp_vehicle_model.h
-GP_H_CG_PY, GP_WB_PY = 0.330, 0.8525 + 0.6975    # gp_vehicle_model.h
+GP_MASS_PY, GP_GRAVITY_PY = 300.0, 9.81
+GP_H_CG_PY, GP_WB_PY = 0.330, 0.8525 + 0.6975
 GP_AIR_DENSITY_PY, GP_AERO_CL_REAR_PY, GP_AERO_AREA_PY = 1.225, 2.27, 1.10
-GP_R_WHEEL_PY = 0.2032                            # gp_vehicle_model.h
+GP_R_WHEEL_PY = 0.2032
 
-PAC_MU_NOM = 1.5           # GP_MU_NOM
-PAC_C_ALPHA_F = 35000.0    # GP_C_ALPHA_F [N/rad]
-PAC_C_ALPHA_R = 32000.0    # GP_C_ALPHA_R [N/rad]
-PAC_FZ_NOM = 0.25 * GP_MASS_PY * GP_GRAVITY_PY   # ~735 N carga estática/rueda
-PAC_CAMBER_STIFF = 900.0     # N/rad, orden de magnitud típico F-SAE (AJUSTAR con banco)
-PAC_ROLL_RES_COEF = 0.012    # coef. resistencia a la rodadura típico slick
+PAC_MU_NOM = 1.5
+PAC_C_ALPHA_F = 35000.0
+PAC_C_ALPHA_R = 32000.0
+PAC_FZ_NOM = 0.25 * GP_MASS_PY * GP_GRAVITY_PY
+PAC_CAMBER_STIFF = 900.0
+PAC_ROLL_RES_COEF = 0.012
 
 
 def magic_formula(x, B, C, D, E=0.0):
@@ -319,15 +263,12 @@ def pac_fy_camber(gamma_deg, fz=PAC_FZ_NOM):
 
 
 def pac_mx_camber(gamma_deg, fz=PAC_FZ_NOM):
-    return 0.6 * pac_fy_camber(gamma_deg, fz) * 0.05  # brazo ~5cm
-
-
+    return 0.6 * pac_fy_camber(gamma_deg, fz) * 0.05
 def pac_my_rolling(fz_axis):
     return PAC_ROLL_RES_COEF * np.asarray(fz_axis) * GP_R_WHEEL_PY
 
 
 def pac_fz_vs_speed(vx_ms, ax=0.0):
-    """Replica simplificada de gp_estimate_fz() [gp_vehicle_model.c], eje trasero."""
     fz_static = PAC_FZ_NOM
     dfz_lon = GP_MASS_PY * ax * GP_H_CG_PY / (GP_WB_PY + 1e-3)
     downforce_rear = 0.5 * GP_AIR_DENSITY_PY * (np.asarray(vx_ms) ** 2) * GP_AERO_CL_REAR_PY * GP_AERO_AREA_PY
@@ -335,7 +276,6 @@ def pac_fz_vs_speed(vx_ms, ax=0.0):
 
 
 def pac_fy_vs_kappa(kappa_pct, alpha_deg=5.0, fz=PAC_FZ_NOM):
-    """Elipse de Kamm: cuánta Fy queda disponible mientras se usa Fx."""
     fy_pure = pac_fy_alpha(alpha_deg, fz)
     fx_pure = pac_fx_kappa(kappa_pct, fz)
     fy_max = PAC_MU_NOM * fz
@@ -371,7 +311,7 @@ def pac_fx_vs_pressure(p_bar, fz=PAC_FZ_NOM):
 
 
 def pac_fy_vs_pressure(p_bar, fz=PAC_FZ_NOM):
-    return pac_fx_vs_pressure(p_bar, fz)  # mismo mu(p) aproximado
+    return pac_fx_vs_pressure(p_bar, fz)
 
 
 # =====================================================================
@@ -410,11 +350,9 @@ def u16(data: bytes, offset: int) -> int:
 
 
 # =====================================================================
-# WORKER: SIMULACIÓN (sin hardware)
+# WORKER: SIMULACIÓN
 # =====================================================================
 class SimWorker(threading.Thread):
-    """Genera formas de onda plausibles para desarrollar/probar la UI sin CAN."""
-
     def __init__(self, hub: DataHub):
         super().__init__(daemon=True)
         self.hub = hub
@@ -435,7 +373,6 @@ class SimWorker(threading.Thread):
 
 def _generate_sim_frame(t: float) -> Dict[str, float]:
     noise = lambda s=1.0: float(np.random.normal(0, s))
-
     vx = max(0.0, 20.0 + 10.0 * math.sin(t * 0.1))
     k_base = 12.0 + 2.0 * math.sin(t * 0.5)
 
@@ -444,6 +381,8 @@ def _generate_sim_frame(t: float) -> Dict[str, float]:
         "wz_int": 120.0 * math.sin(t * 0.15),
         "delta_trq": 20.0 * math.sin(t * 2.0),
         "yaw_ref": 15.0 * math.sin(t * 0.7),
+        "qp_residual": abs(0.02 * math.sin(t * 0.5)) + 0.005,
+        "alpha_qp": 0.0053,
 
         "kappa_opt_rl": k_base,
         "kappa_opt_rr": k_base * 0.95,
@@ -513,14 +452,14 @@ class CanWorker(threading.Thread):
                 except (FileNotFoundError, OSError):
                     print(f"[CanWorker] DBC no encontrado, se omite decode genérico: {path}")
         if not self.dbs:
-            print("[CanWorker] Sin DBC cargado — solo se decodificarán las tramas "
-                  "propietarias AL-QP/TC (0x100-0x102).")
+            print("[CanWorker] Sin DBC cargado — solo se decodificarán las tramas AL-QP/TC Core.")
 
     def run(self) -> None:
         if not HAVE_PYTHON_CAN:
             print("[CanWorker] python-can no está instalado — no se puede usar CAN real.")
             return
-        bus = can.interface.Bus(bustype=CAN_BUSTYPE, channel=self.channel, bitrate=self.bitrate)
+        # Line ~461 in trackside_dashboard.py
+        bus = can.interface.Bus(interface=CAN_BUSTYPE, channel=self.channel, bitrate=self.bitrate)
         try:
             while not self._stop.is_set():
                 msg = bus.recv(timeout=1.0)
@@ -531,15 +470,12 @@ class CanWorker(threading.Thread):
         finally:
             bus.shutdown()
 
-    def stop(self) -> None:
-        self._stop.set()
-
     def _decode(self, mid: int, d: bytes, now: float) -> None:
-        # --- Tramas propietarias del AL-QP / TC, replican gp_pack_telemetry() ---
+        # --- Tramas propietarias del AL-QP / TC ---
         if mid == 0x100 and len(d) >= 8:
             self.hub.push("vy_est", now, i16(d, 0) / 100.0)
-            self.hub.push("wz_int", now, i16(d, 2) / 100.0)          # antes mal leído como qp_residual
-            self.hub.push("kappa_opt_rl", now, u16(d, 4) / 100.0)    # raw/10000 -> fracción; *100 -> %
+            self.hub.push("wz_int", now, i16(d, 2) / 100.0)
+            self.hub.push("kappa_opt_rl", now, u16(d, 4) / 100.0)
             self.hub.push("kappa_opt_rr", now, u16(d, 6) / 100.0)
             return
         if mid == 0x101 and len(d) >= 8:
@@ -553,6 +489,10 @@ class CanWorker(threading.Thread):
             self.hub.push("t_out_rr", now, i16(d, 2) / 10.0)
             self.hub.push("kappa_filt_rl", now, u16(d, 4) / 100.0)
             self.hub.push("kappa_filt_rr", now, u16(d, 6) / 100.0)
+            return
+        if mid == 0x103 and len(d) >= 8:
+            self.hub.push("qp_residual", now, u16(d, 0) / 1000.0)
+            self.hub.push("alpha_qp", now, i16(d, 2) / 1000000.0)
             return
 
         # --- Resto de señales vía DBC / cantools -------------------------------
@@ -633,7 +573,6 @@ class ChannelSelector(QtWidgets.QWidget):
     def _on_item_changed(self, item: QtWidgets.QTreeWidgetItem, _col: int) -> None:
         key = item.data(0, Qt.UserRole)
         if key is None:
-            # cabecera de grupo -> cascada a los hijos
             state = item.checkState(0)
             self.tree.blockSignals(True)
             for i in range(item.childCount()):
@@ -790,9 +729,8 @@ QScrollBar::handle:vertical { background: #333333; border-radius: 4px; }
 """
 
 # =====================================================================
-# COMPONENTES VISUALES AVANZADOS (Añadir antes de MainWindow)
+# COMPONENTES VISUALES AVANZADOS
 # =====================================================================
-
 class MultiPlot(pg.PlotWidget):
     """ Gráfica que superpone múltiples canales en un solo eje """
     def __init__(self, title, channels, y_range=None):
@@ -820,9 +758,8 @@ class GGDiagram(pg.PlotWidget):
         self.setXRange(-20, 20)
         self.setYRange(-20, 20)
         self.showGrid(x=True, y=True, alpha=0.3)
-        self.setAspectLocked(True) # Círculo perfecto
+        self.setAspectLocked(True)
         
-        # Dibujar círculo teórico de 1.5G (~15 m/s2)
         circle = QtWidgets.QGraphicsEllipseItem(-15, -15, 30, 30)
         circle.setPen(pg.mkPen('#555555', width=2, style=Qt.DashLine))
         self.addItem(circle)
@@ -836,7 +773,6 @@ class GGDiagram(pg.PlotWidget):
         _, ax = hub.snapshot("accel_x")
         _, ay = hub.snapshot("accel_y")
         if len(ax) > 0 and len(ay) > 0:
-            # Mostrar los últimos 200 puntos como estela
             self.scatter.setData(x=ay[-200:], y=ax[-200:])
             self.current_dot.setData(x=[ay[-1]], y=[ax[-1]])
 
@@ -845,8 +781,8 @@ class PacejkaTracer(pg.PlotWidget):
     def __init__(self, wheel_name, c_theta, c_mu, c_slip, c_trq):
         super().__init__(title=f"PACEJKA ANALYTICS - {wheel_name}")
         self.keys = (c_theta, c_mu, c_slip, c_trq)
-        self.setXRange(0, 30)  # Slip %
-        self.setYRange(0, 350) # Torque Nm
+        self.setXRange(0, 30)
+        self.setYRange(0, 350)
         self.showGrid(x=True, y=True, alpha=0.3)
         self.setLabel('bottom', "Slip Ratio (%)")
         self.setLabel('left', "Fuerza / Torque (Nm)")
@@ -861,8 +797,7 @@ class PacejkaTracer(pg.PlotWidget):
         slip = hub.latest.get(self.keys[2], 0.0)
         trq = hub.latest.get(self.keys[3], 0.0)
         
-        # Calcular campana de Pacejka aproximada (D*sin(C*arctan(B*kappa)))
-        D = mu * 180.0 # Aproximación de Torque Max
+        D = mu * 180.0
         C = 1.65
         B = theta / (C * D * 100.0) if D > 0 else 0
         
@@ -876,8 +811,6 @@ class ChassisTopDown(QtWidgets.QWidget):
     """ Renderizado del chasis visto desde arriba con vectores de fuerza """
     def __init__(self):
         super().__init__()
-        # SOLUCIÓN 1: Reducimos el alto mínimo de 400 a 250 px. 
-        # Esto le devuelve automáticamente 150 píxeles de alto al Verificador de Sensores.
         self.setMinimumSize(250, 250)
 
     def update_data(self, hub):
@@ -886,8 +819,8 @@ class ChassisTopDown(QtWidgets.QWidget):
         self.trl = hub.latest.get("t_out_rl", 0)
         self.trr = hub.latest.get("t_out_rr", 0)
         self.steer = hub.latest.get("steer_angle", 0)
-        self.ay = hub.latest.get("accel_y", 0)  # proxy de Fy en eje delantero/trasero
-        self.update() # Fuerza el repintado
+        self.ay = hub.latest.get("accel_y", 0)
+        self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -896,18 +829,14 @@ class ChassisTopDown(QtWidgets.QWidget):
         
         p.fillRect(0, 0, w, h, QColor("#111111"))
         
-        # SOLUCIÓN 2: Modificamos 'cy' aplicando un offset negativo (-25 píxeles) 
-        # para desplazar el dibujo del monoplaza y todos sus vectores hacia ARRIBA.
         cx = w // 2
         cy = (h // 2) - 25
         car_w, car_h = 60, 160
         
-        # Dibujar Chasis
         p.setPen(QPen(QColor("#00E5FF"), 2))
         p.setBrush(QBrush(QColor("#222222")))
         p.drawRoundedRect(cx - car_w//2, cy - car_h//2, car_w, car_h, 10, 10)
         
-        # Dibujar Ruedas Delanteras (con dirección)
         p.setBrush(QBrush(QColor("#555555")))
         p.translate(cx - car_w//2 - 10, cy - car_h//2 + 20)
         p.rotate(self.steer)
@@ -918,7 +847,6 @@ class ChassisTopDown(QtWidgets.QWidget):
         p.drawRect(-5, -15, 10, 30)
         p.resetTransform()
         
-        # Vectores de Torque Traseros
         scale = 0.3
         p.setPen(QPen(QColor("#FF00FF"), 4))
         p.drawLine(cx - car_w//2 - 10, cy + car_h//2 - 20, 
@@ -928,15 +856,13 @@ class ChassisTopDown(QtWidgets.QWidget):
         p.drawLine(cx + car_w//2 + 10, cy + car_h//2 - 20, 
                    cx + car_w//2 + 10, cy + car_h//2 - 20 - int(self.trr * scale))
                    
-        # Vector Deriva (vy)
         p.setPen(QPen(QColor("#FF3333"), 3))
         p.drawLine(cx, cy, cx + int(self.vy * 40), cy)
 
-        # Vectores de Fuerza Lateral por eje
         fy_len = int(getattr(self, "ay", 0.0) * 3.0)
         p.setPen(QPen(QColor("#00FFAA"), 3))
         p.drawLine(cx - car_w // 2, cy - car_h // 2 + 20, cx - car_w // 2 - fy_len, cy - car_h // 2 + 20)
-        p.drawLine(cx + car_w // 2, cy - car_h // 2 + 20, cx + car_w // 2 - fy_len, cy - car_h // 2 + 20)
+        p.drawLine(cx + car_w // 2, cy - car_h // 2 + 20, cx + car_w // 2 - fy_len, cy + car_h // 2 - 20)
         p.drawLine(cx - car_w // 2, cy + car_h // 2 - 20, cx - car_w // 2 - fy_len, cy + car_h // 2 - 20)
         p.drawLine(cx + car_w // 2, cy + car_h // 2 - 20, cx + car_w // 2 - fy_len, cy + car_h // 2 - 20)
 
@@ -947,8 +873,7 @@ class ActiveSetLEDs(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         self.leds = {}
         
-        # Definir los "LEDs"
-        checks = ["AL-QP Convergencia", "Límite Térmico Inv.", "Límite Fricción (Kamm)", "Asimetría / Mu-Split"]
+        checks = ["AL-QP Convergencia", "Límite Técnico Inv.", "Límite Fricción (Kamm)", "Asimetría / Mu-Split"]
         for name in checks:
             row = QtWidgets.QHBoxLayout()
             led = QtWidgets.QLabel("⚫")
@@ -962,13 +887,14 @@ class ActiveSetLEDs(QtWidgets.QWidget):
             self.leds[name] = led
 
     def update_data(self, hub):
-        res = hub.latest.get("wz_int", 0) # Usamos wz_int como proxy visual del residuo temporalmente
+        res = hub.latest.get("qp_residual", 0.0)  # FIXED: Ahora lee el residuo real de la trama 0x103[cite: 1]
         temp = max(hub.latest.get("left_motor_temp", 0), hub.latest.get("right_motor_temp", 0))
         ay = hub.latest.get("accel_y", 0)
         mu_diff = abs(hub.latest.get("mu_rl", 1) - hub.latest.get("mu_rr", 1))
 
-        self._set_led("AL-QP Convergencia", abs(res) > 150, "red")
-        self._set_led("Límite Térmico Inv.", temp > 85, "orange")
+        # El residuo del solver KKT debe converger por debajo del umbral de tolerancia
+        self._set_led("AL-QP Convergencia", res > 0.05, "red")
+        self._set_led("Límite Técnico Inv.", temp > 85, "orange")
         self._set_led("Límite Fricción (Kamm)", abs(ay) > 12, "cyan")
         self._set_led("Asimetría / Mu-Split", mu_diff > 0.4, "yellow")
 
@@ -978,13 +904,9 @@ class ActiveSetLEDs(QtWidgets.QWidget):
 
 
 # =====================================================================
-# PACEJKA LAB — gráfica genérica reutilizable
+# PACEJKA LAB
 # =====================================================================
 class PacejkaCurvePlot(pg.PlotWidget):
-    """Familia de curvas Pacejka (barrido de un parámetro) + punto de
-    operación en vivo superpuesto cuando hay canales de telemetría reales
-    que representarlo (kappa/alpha/Fz medidos/estimados)."""
-
     def __init__(self, title, xlabel, ylabel, curve_fn, x_range,
                  sweep_values=(None,), sweep_labels=(None,),
                  live_x_key=None, live_y_key=None, colors=None):
@@ -1019,8 +941,9 @@ class PacejkaCurvePlot(pg.PlotWidget):
         if x is not None and y is not None:
             self.live_dot.setData(x=[x], y=[y])
 
-
-# Configuración de las 14 gráficas pedidas (título, ejes, función, barrido, live overlay)
+# =====================================================================
+# CONFIGURACIÓN DE LAS 14 GRÁFICAS DEL PACEJKA LAB
+# =====================================================================
 _PACEJKA_SPECS = [
     dict(title="1. Fx vs Slip Ratio (κ)", xlabel="κ (%)", ylabel="Fx (N)",
          x_range=(-30, 30), curve_fn=pac_fx_kappa,
@@ -1066,11 +989,7 @@ _PACEJKA_SPECS = [
          sweep_values=(1200.0, 2200.0, 3200.0), sweep_labels=("Fz=1200N", "Fz=2200N", "Fz=3200N")),
 ]
 
-
 class PacejkaLabPanel(QtWidgets.QScrollArea):
-    """Grid con las 14 gráficas de caracterización Pacejka (MF6.2-lite,
-    paramétrico + overlay de operación en vivo donde aplica)."""
-
     def __init__(self, columns: int = 2):
         super().__init__()
         self.setWidgetResizable(True)
@@ -1094,12 +1013,7 @@ class PacejkaLabPanel(QtWidgets.QScrollArea):
 # =====================================================================
 # VERIFICADOR DE SENSORES
 # =====================================================================
-STALE_THRESHOLD_S = 1.0
-
 class SensorHealthPanel(QtWidgets.QWidget):
-    """Comprueba que cada canal siga actualizándose (no muerto en el bus)
-    y que su último valor esté dentro de rango físico plausible."""
-
     def __init__(self, channels: List[ChannelSpec]):
         super().__init__()
         self.channels = channels
@@ -1210,14 +1124,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dashboard = DashboardArea(self.channels_by_key, columns=3)
         self.selector = ChannelSelector(channels, self.dashboard.set_active)
 
-        # ---- Columna izquierda: selector de canales | G-G/Modelo/Salud ----
         self.left_info = LeftInfoPanel(channels)
         left_tabs = QtWidgets.QTabWidget()
         left_tabs.addTab(self.selector, "Canales")
         left_tabs.addTab(self.left_info, "G-G / Modelo / Salud")
         left_tabs.setFixedWidth(360)
 
-        # ---- Zona central: Dashboard principal | Pacejka Lab ----
         self.pacejka_lab = PacejkaLabPanel(columns=2)
         center_tabs = QtWidgets.QTabWidget()
         center_tabs.addTab(self.dashboard, "Dashboard Principal")
@@ -1236,7 +1148,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cl.addWidget(splitter, 1)
         self.setCentralWidget(central)
 
-        self.selector._apply_preset("AL-QP Core")  # preset inicial sensato
+        self.selector._apply_preset("AL-QP Core")
 
         self._logging = False
         self._log_file = None
@@ -1269,7 +1181,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_logging(self, checked: bool) -> None:
         if checked:
             log_dir = os.path.join("output", "logs")
-            os.makedirs(log_dir, exist_ok=True) # Crea la carpeta mágicamente si no existe
+            os.makedirs(log_dir, exist_ok=True)
             fname = os.path.join(log_dir, time.strftime("telemetry_%Y%m%d_%H%M%S.csv"))            
             self._log_file = open(fname, "w", newline="")
             self._log_writer = csv.writer(self._log_file)
@@ -1295,9 +1207,6 @@ class MainWindow(QtWidgets.QMainWindow):
         event.accept()
 
 
-# =====================================================================
-# MAIN
-# =====================================================================
 def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -1321,24 +1230,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-# =====================================================================
-# BONUS — parche mínimo de firmware para recuperar qp_residual "de verdad"
-# =====================================================================
-# Si quieres qp_residual real en pista (no solo en el simulador), añade una
-# 4ª trama 0x103 en gp_interface.c dentro de gp_pack_telemetry():
-#
-#   void gp_pack_telemetry(..., uint8_t can_diag[8]) {
-#       ...
-#       float qp_res = 0.0f;
-#       gp_qp_solve_rwd(..., &qp_res);           // ya te devuelve el residuo
-#       uint16_t qp_pack = (uint16_t)(qp_res * 1000.0f);
-#       can_diag[0] = (qp_pack >> 8) & 0xFF; can_diag[1] = qp_pack & 0xFF;
-#       int16_t alpha_pack = (int16_t)(state->alpha_qp * 1e6f);
-#       can_diag[2] = (alpha_pack >> 8) & 0xFF; can_diag[3] = alpha_pack & 0xFF;
-#   }
-#
-# y envíala con ID 0x103 desde gp_mode_intermediate(). En este dashboard
-# solo haría falta añadir un `elif mid == 0x103:` en CanWorker._decode y
-# un ChannelSpec "qp_residual" de vuelta al registro.

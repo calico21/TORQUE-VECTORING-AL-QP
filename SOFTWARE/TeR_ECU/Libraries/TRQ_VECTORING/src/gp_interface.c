@@ -2,15 +2,12 @@
  * gp_interface.c
  */
 
+#include <stdint.h>
 #include "gp_interface.h"
 #include "gp_torque_vectoring.h"
 #include "TeR_INERTIAL.h" // Para leer la IMU global
 #include "TeR_CAN.h"      // Para leer la estructura global del monoplaza
 #include "stm32f4xx_hal.h" // Necesario para acceder a los registros DWT y CoreDebug
-
-// IDs propuestos para el Bus CAN
-#define CAN_ID_TV_DYNAMICS   0x100
-#define CAN_ID_TC_ESTIMATOR  0x101
 
 #define GP_DEG2RAD  0.0174532925f
 #define GP_KMH2MS   0.2777777778f
@@ -20,11 +17,19 @@
 // Memoria estática del controlador
 static tv_state_t gp_state;
 
-// Variable global (o estática) para poder leerla desde el Live Monitor o Debugger
+// Residual de la última ejecución del solver QP
+static float gp_last_qp_residual = 0.0f;
+
+// Variable global para lectura desde Live Monitor o Debugger
 volatile float gp_execution_time_us = 0.0f;
 
 void gp_init(void) {
     gp_tv_init(&gp_state);
+    gp_last_qp_residual = 0.0f;
+}
+
+const tv_state_t* gp_get_state(void) {
+    return &gp_state;
 }
 
 trqMap_t gp_mode_intermediate(trq_t limit) {
@@ -56,35 +61,41 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
     omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
 
-    // Lectura del Freno (Ahora en Bares de presión)
+    // Lectura del Freno (en Bares de presión)
     #define MAX_BRAKE_PRESSURE_BAR 30.0f 
-    
     float brake_norm = (float)TeR.bpps.bpps / MAX_BRAKE_PRESSURE_BAR;
     brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
 
+    // Lectura de temperaturas de inverters
+    float temp_inv_rl = (float)TeR.inverterInfo.left_power_stage_temp;
+    float temp_inv_rr = (float)TeR.inverterInfo.right_power_stage_temp;
+
     // Ejecución del núcleo matemático
     float t_cmd_out[4] = {0.0f};
-    gp_tv_step(fx_driver, delta_rueda, vx, vy, wz, ay, ax, omega, brake_norm, GP_LOOPTIME, &gp_state, t_cmd_out);
+    gp_tv_step(fx_driver, delta_rueda, vx, vy, wz, ay, ax, 
+               omega, brake_norm, temp_inv_rl, temp_inv_rr, 
+               GP_LOOPTIME, &gp_state, t_cmd_out);
 
     // Empaquetado de salida
     out_map.rLeft  = (trq_t)t_cmd_out[GP_RL];
     out_map.rRight = (trq_t)t_cmd_out[GP_RR];
 
-    // 2. PARAR CONTADOR Y CALCULAR TIEMPO
+    // 2. PARAR CONTADOR Y CALCULAR TIEMPO (STM32F405 @ 168 MHz)
     uint32_t end_ticks = DWT->CYCCNT;
     uint32_t execution_ticks = end_ticks - start_ticks;
-    
-    // CORRECCIÓN: STM32F405VGTx de la ECU de producción corre a 168 MHz (1 tick = 1/168 us)
     gp_execution_time_us = (float)execution_ticks / 168.0f; 
 
     return out_map;
 }
 
-#include <stdint.h>
-#include "gp_torque_vectoring.h"
-
-void gp_pack_telemetry(const tv_state_t* state, uint8_t can_dyn[8], uint8_t can_tc[8], uint8_t can_act[8]) {
-    
+void gp_pack_telemetry(
+    const tv_state_t* state, 
+    float qp_residual,
+    uint8_t can_dyn[8], 
+    uint8_t can_tc[8], 
+    uint8_t can_act[8],
+    uint8_t can_diag[8]
+) {
     // --- TRAMA 1: Dinámica y KKT (ID: 0x100) ---
     // vy_est (Deriva Lateral) -> Escala * 100
     int16_t vy_pack = (int16_t)(state->vy_est * 100.0f);
@@ -133,4 +144,17 @@ void gp_pack_telemetry(const tv_state_t* state, uint8_t can_dyn[8], uint8_t can_
     // Slip Actual Filtrado RR -> Escala * 10000
     uint16_t kfilt_rr = (uint16_t)(state->tc.kappa_filt[GP_RR] * 10000.0f);
     can_act[6] = (kfilt_rr >> 8) & 0xFF; can_act[7] = kfilt_rr & 0xFF;
+
+    // --- TRAMA 4: Solver Diagnostics & Residual (ID: 0x103) [NUEVO] ---
+    // qp_residual (Residuo de igualdad KKT) -> Escala * 1000
+    uint16_t qp_pack = (uint16_t)(qp_residual * 1000.0f);
+    can_diag[0] = (qp_pack >> 8) & 0xFF; can_diag[1] = qp_pack & 0xFF;
+
+    // alpha_qp (Paso de aprendizaje del AL-QP) -> Escala * 1e6
+    int16_t alpha_pack = (int16_t)(state->alpha_qp * 1000000.0f);
+    can_diag[2] = (alpha_pack >> 8) & 0xFF; can_diag[3] = alpha_pack & 0xFF;
+
+    // Bytes 4-7 reservados
+    can_diag[4] = 0; can_diag[5] = 0;
+    can_diag[6] = 0; can_diag[7] = 0;
 }
