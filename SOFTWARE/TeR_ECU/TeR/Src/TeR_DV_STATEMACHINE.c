@@ -506,4 +506,3 @@ void toggle_assi_blue() {
 void set_assi_blue(uint8_t set) {
 	HAL_GPIO_WritePin(DOUT3_GPIO_Port, DOUT3_Pin, set);
 }
-

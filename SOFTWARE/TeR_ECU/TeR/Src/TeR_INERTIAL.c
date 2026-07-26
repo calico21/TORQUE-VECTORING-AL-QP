@@ -273,4 +273,3 @@ void compFilter(float gx, float gy, float gz, float ax, float ay, float az,
 	float magYaw = atan2f(-my, mx) * 180.0f / M_PI;
 	*yaw = ALPHA * (*yaw + gz * DT) + (1 - ALPHA) * magYaw;
 }
-
