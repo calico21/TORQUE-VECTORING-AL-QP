@@ -29,6 +29,14 @@ typedef struct {
     float mz_sat_ratio;
     float vy_gps_last;      // last GPS-derived lateral velocity [m/s]
     float vy_gps_age_ms;    // time since last GPS fix update [ms]
+
+    // ── Diagnostic Telemetry Additions ──────────────
+    float mz_req_logged;         // Desired yaw moment requested by PID
+    float mz_achieved_logged;    // Actual yaw moment delivered by wheel torque split
+    float qp_residual_logged;    // Equality constraint residual magnitude
+    uint32_t branch_flap_count;  // Cumulative active-set branch flips (chattering index)
+    uint8_t active_set_case;     // 0: Interior, 1: Single Saturation, 2: Double/Unreachable
+    float max_slew_logged;       // Peak slew rate observed in current cycle
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);

@@ -13,7 +13,7 @@
 #define GP_TC_B1             -0.0018f  // Sensibilidad a la carga de B
 #define GP_TC_C_PAC          1.65f     // Factor de forma C
 #define GP_TC_ALPHA_PEAK     0.20f     // [rad] Peak lateral slip angle (~11.5 deg)
-#define GP_TC_KP             45.0f     // Detuned Kp to prevent aggressive cuts fighting AL-QP
+#define GP_TC_KP             41.074f     // Detuned Kp to prevent aggressive cuts fighting AL-QP
 #define GP_TC_KI             12.0f     // Detuned Ki to slow integral windup
 #define GP_TC_I_MAX          3.5f      // Saturación Anti-windup
 #define GP_TC_V_KP_SCALE     3.0f      // [m/s] Boost de Kp a baja velocidad

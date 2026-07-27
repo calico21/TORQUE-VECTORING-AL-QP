@@ -150,10 +150,19 @@ void gp_tv_step(
     t_ub_power[GP_RL] *= derate_rl;
     t_ub_power[GP_RR] *= derate_rr;
 
+    // --- FIX: 10ms LPF pre-filtering on friction bounds to stop active-set flapping ---
+    static float t_ub_rl_filt = 0.0f;
+    static float t_ub_rr_filt = 0.0f;
+    float alpha_ub = GP_CLAMP(dt / (0.010f + dt), 0.0f, 1.0f);
+    
+    t_ub_rl_filt += alpha_ub * (t_ub_friction[GP_RL] - t_ub_rl_filt);
+    t_ub_rr_filt += alpha_ub * (t_ub_friction[GP_RR] - t_ub_rr_filt);
+
     float t_ub[4];
-    for (int i = 0; i < 4; i++) {
-        t_ub[i] = GP_MIN(t_ub_friction[i], t_ub_power[i]);
-    }
+    t_ub[GP_FL] = 0.0f;
+    t_ub[GP_FR] = 0.0f;
+    t_ub[GP_RL] = GP_MIN(t_ub_rl_filt, t_ub_power[GP_RL]);
+    t_ub[GP_RR] = GP_MIN(t_ub_rr_filt, t_ub_power[GP_RR]);
 
     // --- ESCUDO DE FRICCIÓN (Friction Budgeting) ---
     float max_sum = t_ub[GP_RL] + t_ub[GP_RR];
@@ -188,6 +197,23 @@ void gp_tv_step(
     }
     
     float max_delta_t = GP_TV_RATE_LIMIT * dt;
+    float current_max_slew = 0.0f;
+
+    for (int i = 0; i < 4; i++) {
+        float delta_t = GP_CLAMP(qp_result[i] - state->t_qp_prev[i], -max_delta_t, max_delta_t);
+        
+        // Track true physical slew rate (Nm/s)
+        float slew_val = fabsf(delta_t) / dt;
+        if (slew_val > current_max_slew) {
+            current_max_slew = slew_val;
+        }
+
+        float tv_final = state->t_qp_prev[i] + delta_t;
+        
+        state->t_qp_prev[i] = tv_final;
+        t_cmd_out[i] = tv_final;
+    }
+    state->max_slew_logged = current_max_slew;
     for (int i = 0; i < 4; i++) {
         float delta_t = GP_CLAMP(qp_result[i] - state->t_qp_prev[i], -max_delta_t, max_delta_t);
         float tv_final = state->t_qp_prev[i] + delta_t;

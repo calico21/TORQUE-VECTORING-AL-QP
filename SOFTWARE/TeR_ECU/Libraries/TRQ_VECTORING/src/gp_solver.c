@@ -65,17 +65,13 @@ void gp_qp_solve_rwd(
 }
 
 void gp_qp_solve_rwd_closedform(
-    const float t_warmstart[4],
-    const float t_prev[4],
-    float fx_driver,
-    const float t_lb[4],
-    const float t_ub[4],
-    float t_out[4],
-    float* qp_residual
+    const float t_warmstart[4], const float t_prev[4], float fx_driver,
+    const float t_lb[4], const float t_ub[4], float t_out[4], float* qp_residual
 ) {
-    const float h     = GP_W_REG + GP_W_SMOOTH;
-    const float a_eq  = 1.0f / GP_R_WHEEL;
-    const float b_eq  = fx_driver;
+    const float h    = GP_W_REG + GP_W_SMOOTH;
+    const float a_eq = 1.0f / GP_R_WHEEL;
+    const float b_eq = fx_driver;
+    const float SAT_HYSTERESIS = 3.0f; // Nm — tune against your torque resolution
 
     const float t_bl_rl = (GP_W_REG * t_warmstart[GP_RL] + GP_W_SMOOTH * t_prev[GP_RL]) / h;
     const float t_bl_rr = (GP_W_REG * t_warmstart[GP_RR] + GP_W_SMOOTH * t_prev[GP_RR]) / h;
@@ -83,13 +79,15 @@ void gp_qp_solve_rwd_closedform(
     const float lb_rl = t_lb[GP_RL], ub_rl = t_ub[GP_RL];
     const float lb_rr = t_lb[GP_RR], ub_rr = t_ub[GP_RR];
 
-    // ---- Caso 1: punto estacionario interior (KKT sin cajas) ----
     const float lam = h * (a_eq * (t_bl_rl + t_bl_rr) - b_eq) / (2.0f * a_eq * a_eq);
     float t_rl = t_bl_rl - lam * a_eq / h;
     float t_rr = t_bl_rr - lam * a_eq / h;
 
-    const int rl_out = (t_rl < lb_rl) || (t_rl > ub_rl);
-    const int rr_out = (t_rr < lb_rr) || (t_rr > ub_rr);
+    // Hysteresis: only declare saturation once we're clearly past the bound,
+    // not the instant we touch it — kills single-cycle branch flapping
+    const int rl_out = (t_rl < lb_rl - SAT_HYSTERESIS) || (t_rl > ub_rl + SAT_HYSTERESIS);
+    const int rr_out = (t_rr < lb_rr - SAT_HYSTERESIS) || (t_rr > ub_rr + SAT_HYSTERESIS);
+
 
     if (rl_out || rr_out) {
         // ---- Caso 2: exactamente una rueda satura, la otra resuelve la igualdad ----
