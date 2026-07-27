@@ -62,13 +62,13 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
 
     // Lectura del Freno (en Bares de presión)
-    #define MAX_BRAKE_PRESSURE_BAR 30.0f 
+    #define MAX_BRAKE_PRESSURE_BAR 50.0f // must track TeR_CONSTANTS.h::MAX_BPPS_VALUE (kept local: TRQ_VECTORING scope excludes TeR_CONSTANTS.h)
     float brake_norm = (float)TeR.bpps.bpps / MAX_BRAKE_PRESSURE_BAR;
     brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
 
     // Lectura de temperaturas de inverters
-    float temp_inv_rl = (float)TeR.inverterInfo.left_power_stage_temp;
-    float temp_inv_rr = (float)TeR.inverterInfo.right_power_stage_temp;
+    float temp_inv_rl = (float)TeR.invInfo.left_power_stage_temp;
+    float temp_inv_rr = (float)TeR.invInfo.right_power_stage_temp;
 
     // Ejecución del núcleo matemático
     float t_cmd_out[4] = {0.0f};

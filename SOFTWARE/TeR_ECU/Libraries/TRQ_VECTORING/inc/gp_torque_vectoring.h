@@ -17,9 +17,11 @@ typedef struct {
     float t_out_prev[4];
     tc_state_t tc;
     float vy_est;     
-    float alpha_qp;   // <-- Debe estar aquí
-    float lam_prev;   // <-- Debe estar aquí
-    float mz_sat_ratio; // Anti-windup: cuánto del Mz pedido pudo entregar el solver el ciclo anterior [0,1]
+    float alpha_qp;
+    float lam_prev;
+    float mz_sat_ratio;
+    float vy_gps_last;      // last GPS-derived lateral velocity [m/s]
+    float vy_gps_age_ms;    // time since last GPS fix update [ms]
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);
@@ -27,8 +29,8 @@ void gp_tv_init(tv_state_t* state);
 void gp_tv_step(
     float fx_driver, float delta, float vx, float vy, float wz, 
     float ay, float ax, const float omega[4], float brake_norm, 
-    float temp_inv_rl, float temp_inv_rr, float dt, 
-    tv_state_t* state, float t_cmd_out[4]
+    float temp_inv_rl, float temp_inv_rr, float vy_gps, uint8_t gps_valid,
+    float dt, tv_state_t* state, float t_cmd_out[4]
 );
 
 #endif // GP_TORQUE_VECTORING_H

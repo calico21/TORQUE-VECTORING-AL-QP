@@ -1013,6 +1013,7 @@ class PacejkaLabPanel(QtWidgets.QScrollArea):
 # =====================================================================
 # VERIFICADOR DE SENSORES
 # =====================================================================
+STALE_THRESHOLD_S = 1.0  
 class SensorHealthPanel(QtWidgets.QWidget):
     def __init__(self, channels: List[ChannelSpec]):
         super().__init__()

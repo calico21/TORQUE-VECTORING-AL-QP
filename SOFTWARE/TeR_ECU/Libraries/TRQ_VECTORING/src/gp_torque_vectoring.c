@@ -151,14 +151,12 @@ void gp_tv_step(
     float qp_result[4];
     float qp_residual;
 
-    gp_qp_solve_rwd(
+    gp_qp_solve_rwd_closedform(
         t_nominal,
         state->t_qp_prev,
         fx_driver,
         t_lb,
         t_ub,
-        state->alpha_qp,       // <-- EL FACTOR DE SUAVIDAD
-        &state->lam_prev,      // <-- LA MEMORIA DEL MULTIPLICADOR DE LAGRANGE
         qp_result,
         &qp_residual
     );
