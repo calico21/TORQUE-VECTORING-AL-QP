@@ -180,4 +180,4 @@ def run_bayesian_optimization(total_iterations=30, init_random=5):
     compile_c_core()
 
 if __name__ == "__main__":
-    run_bayesian_optimization(total_iterations=25, init_random=5)
+    run_bayesian_optimization(total_iterations=1000, init_random=20)

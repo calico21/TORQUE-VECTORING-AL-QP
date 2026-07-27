@@ -213,14 +213,6 @@ void gp_tv_step(
         state->t_qp_prev[i] = tv_final;
         t_cmd_out[i] = tv_final;
     }
-    state->max_slew_logged = current_max_slew;
-    for (int i = 0; i < 4; i++) {
-        float delta_t = GP_CLAMP(qp_result[i] - state->t_qp_prev[i], -max_delta_t, max_delta_t);
-        float tv_final = state->t_qp_prev[i] + delta_t;
-        
-        state->t_qp_prev[i] = tv_final;
-        t_cmd_out[i] = tv_final;
-    }
 
     gp_tc_step(t_cmd_out, omega, vx, vy, wz, fz_est, dt, &state->tc);
     

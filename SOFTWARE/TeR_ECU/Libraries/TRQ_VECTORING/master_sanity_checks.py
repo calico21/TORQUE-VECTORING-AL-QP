@@ -10,10 +10,17 @@ import ctypes
 
 class TCState(ctypes.Structure):
     _fields_ = [
-        ("slip_ratio", ctypes.c_float * 4),
-        ("mu_surface", ctypes.c_float * 2),
-        ("pi_integral", ctypes.c_float * 4),
-        ("active", ctypes.c_uint8),
+        ("pi_integral",     ctypes.c_float * 4),
+        ("kappa_filt",      ctypes.c_float * 4),
+        ("mu_surface",      ctypes.c_float * 2),
+        ("omega_last_raw",  ctypes.c_float * 4),
+        ("omega_prev_ema",  ctypes.c_float * 4),
+        ("rls_P",           ctypes.c_float * 4),
+        ("rls_theta",       ctypes.c_float * 4),
+        ("theta_prev",      ctypes.c_float * 4),
+        ("kappa_prev",      ctypes.c_float * 4),
+        ("fx_prev",         ctypes.c_float * 4),
+        ("kappa_opt",       ctypes.c_float * 4),
     ]
 
 class TVState(ctypes.Structure):
@@ -30,6 +37,9 @@ class TVState(ctypes.Structure):
         ("vy_gps_last", ctypes.c_float),
         ("vy_gps_age_ms", ctypes.c_float),
     ]
+
+# Structural Safety Assertion (Prevents silent memory layout drift)
+assert ctypes.sizeof(TCState) == 42 * 4, f"TCState size mismatch: {ctypes.sizeof(TCState)} != {42*4}"
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')
 except OSError:

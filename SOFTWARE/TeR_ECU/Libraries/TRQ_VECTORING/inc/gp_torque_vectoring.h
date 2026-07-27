@@ -6,6 +6,12 @@
 #include "gp_solver.h"
 #include "gp_traction_control.h"
 
+// ── Bayesian-Optimized Controller Parameters ─────────────────────────
+#define GP_W_SMOOTH                 5.787f   // Actuator rate penalty weight
+#define GP_W_REG                    0.405f   // Torque regularization weight
+#define GP_TC_KP                    25.271f  // Traction control proportional gain
+
+// Controller Limits & Thresholds
 #define GP_TV_MAX_MZ                1500.0f
 #define GP_TV_WZ_I_MAX              200.0f
 #define GP_TV_RATE_LIMIT            5000.0f
@@ -29,14 +35,6 @@ typedef struct {
     float mz_sat_ratio;
     float vy_gps_last;      // last GPS-derived lateral velocity [m/s]
     float vy_gps_age_ms;    // time since last GPS fix update [ms]
-
-    // ── Diagnostic Telemetry Additions ──────────────
-    float mz_req_logged;         // Desired yaw moment requested by PID
-    float mz_achieved_logged;    // Actual yaw moment delivered by wheel torque split
-    float qp_residual_logged;    // Equality constraint residual magnitude
-    uint32_t branch_flap_count;  // Cumulative active-set branch flips (chattering index)
-    uint8_t active_set_case;     // 0: Interior, 1: Single Saturation, 2: Double/Unreachable
-    float max_slew_logged;       // Peak slew rate observed in current cycle
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);
