@@ -48,16 +48,25 @@ void gp_tv_init(tv_state_t* state) {
         state->t_out_prev[i] = 0.0f;
     }
     gp_tc_init(&state->tc);
+    gp_ekf_init(&state->ekf);
     state->vy_est = 0.0f;
     state->vy_gps_last = 0.0f;
-    state->vy_gps_age_ms = 1000.0f; // Stale initial age
+    state->vy_gps_age_ms = 1000.0f;
+    
+    // Zero-initialize isolated filters (Fixes cross-scenario leakage)
+    state->ax_filt = 0.0f;
+    state->ay_filt = 0.0f;
+    state->t_ub_rl_filt = 0.0f;
+    state->t_ub_rr_filt = 0.0f;
     
     float h = GP_W_REG + GP_W_SMOOTH;
     float a_sq = 2.0f / (GP_R_WHEEL * GP_R_WHEEL);
     state->alpha_qp = 1.0f / (h + GP_RHO_AL * a_sq);
     state->lam_prev = 0.0f;
-    state->mz_sat_ratio = 1.0f; // Full authority initial assumption
+    state->mz_sat_ratio = 1.0f;
 }
+
+#include "gp_ekf.h"  // Ensure gp_ekf.h is included at top of file
 
 void gp_tv_step(
     float fx_driver, float delta, float vx, float vy, float wz, 
@@ -90,45 +99,41 @@ void gp_tv_step(
     if (fabsf(delta) < GP_STEER_DEADZONE_RAD) { delta = 0.0f; }
     if (fabsf(wz) < GP_YAW_DEADZONE_RADS)     { wz = 0.0f;    }
 
-    // --- 1st-Order Low-Pass Filter on Accelerometer Signals ---
-    static float ax_filt = 0.0f;
-    static float ay_filt = 0.0f;
+    // --- 1st-Order Low-Pass Filter on Accelerometer Signals (State-Isolated) ---
     float alpha_lpf = GP_CLAMP(dt / (GP_ACCEL_LPF_TAU + dt), 0.0f, 1.0f);
-    ax_filt += alpha_lpf * (ax - ax_filt);
-    ay_filt += alpha_lpf * (ay - ay_filt);
+    state->ax_filt += alpha_lpf * (ax - state->ax_filt);
+    state->ay_filt += alpha_lpf * (ay - state->ay_filt);
 
     float vx_safe = GP_MAX(fabsf(vx), 0.5f);
     
-    // --- Fading-memory side-slip observer with active GPS fusion ---
-    float vy_dot = ay_filt - (vx_safe * wz);
-    float vy_ss = (GP_LR * wz) - ((GP_MASS * ay_filt * GP_LF * vx_safe) / (GP_WB * GP_C_ALPHA_R));
-    float k_corr = 2.0f;
-    float vy_corr = vy_dot - k_corr * (state->vy_est - vy_ss);
+    // ─────────────────────────────────────────────────────────────────
+    // 1. UNIFIED EXTENDED KALMAN FILTER (EKF) STEP
+    // ─────────────────────────────────────────────────────────────────
+    // A. Time Update (Prediction)
+    gp_ekf_predict(&state->ekf, delta, state->ax_filt, state->ay_filt, wz, vx, dt);
 
-    if (gps_valid) {
-        float k_gps = 1.5f; // GPS correction weight
-        vy_corr -= k_gps * (state->vy_est - vy_gps);
-        state->vy_gps_last = vy_gps;
-        state->vy_gps_age_ms = 0.0f;
-    } else {
-        state->vy_gps_age_ms += dt * 1000.0f;
-    }
+    // B. Measurement Updates (Sequential Scalar Fusion)
+    gp_ekf_update_gps(&state->ekf, vy_gps, gps_valid);
+    gp_ekf_update_kinematic_ss(&state->ekf, state->ay_filt, wz, vx);
 
-    state->vy_est += vy_corr * dt;
-    vy = state->vy_est;
+    // C. Extract State Estimates (Read-Only Telemetry / Feedback Isolation)
+    vy = state->ekf.x[GP_EKF_STATE_VY];
+    float wz_corr = state->ekf.wz_corrected;  // Gyro bias compensated yaw rate
+    float beta = state->ekf.beta_est;          // Derived sideslip angle [rad]
 
-    float beta = atan2f(vy, vx_safe);
+    // NOTE: We DO NOT overwrite state->tc.mu_surface here. 
+    // Traction Control retains full ownership of its own stable EMA filter.
 
     float fz_est[4];
     float fy_est[4];
-    gp_estimate_fz(vx, ax_filt, ay_filt, fz_est);
-    gp_estimate_fy(vx, vy, wz, delta, fz_est, fy_est);
+    gp_estimate_fz(vx, state->ax_filt, state->ay_filt, fz_est);
+    gp_estimate_fy(vx, vy, wz_corr, delta, fz_est, fy_est);
     
     float k_us = gp_adaptive_k_us(fz_est);
     float wz_ref = (vx_safe * delta) / (GP_WB + k_us * vx_safe * vx_safe);
     
     float v_norm  = GP_CLAMP(vx_safe / 30.0f, 0.0f, 1.0f);
-    float ay_norm = GP_CLAMP(fabsf(ay_filt) / 15.0f, 0.0f, 1.0f);
+    float ay_norm = GP_CLAMP(fabsf(state->ay_filt) / 15.0f, 0.0f, 1.0f);
     
     float kp = gp_bilinear_interp_4x4(Kp_map, v_norm, ay_norm);
     float ki = gp_bilinear_interp_4x4(Ki_map, v_norm, ay_norm);
@@ -139,18 +144,25 @@ void gp_tv_step(
     kp *= mu_scale;
     ki *= mu_scale;
 
-    float wz_err = wz_ref - wz;
+    float wz_err = wz_ref - wz_corr;
     float delta_dot = (delta - state->delta_prev) / dt;
     state->delta_prev = delta;
 
-    const float k_beta = 4000.0f;
-    float beta_term = -k_beta * beta;
+    // ─────────────────────────────────────────────────────────────────
+    // 2. DYNAMIC BETA STABILIZATION (CLIPPED VARIANCE SCALING)
+    // ─────────────────────────────────────────────────────────────────
+    // Clamp vy_std to prevent unbounded positive feedback in k_beta
+    float vy_std_clamped = GP_CLAMP(state->ekf.vy_std, 0.0f, 0.3f);
+    float k_beta_dynamic = 4000.0f * (1.0f + 2.0f * vy_std_clamped);
+    
+    // FIX #4: Directly clamp the torque contribution authority of beta_term to ±600 Nm
+    float beta_term = GP_CLAMP(-k_beta_dynamic * beta, -600.0f, 600.0f);
 
     float raw_int = state->wz_int + wz_err * dt * state->mz_sat_ratio;
     state->wz_int = GP_TV_WZ_I_MAX * tanhf(raw_int / GP_TV_WZ_I_MAX);
 
-    float os_gate = 1.0f - gp_sigmoid((fabsf(wz) - fabsf(wz_ref) - 0.2f) * 10.0f);
-    float counter_steer_factor = 1.0f - gp_sigmoid(-(delta * wz + 0.05f) * 40.0f);
+    float os_gate = 1.0f - gp_sigmoid((fabsf(wz_corr) - fabsf(wz_ref) - 0.2f) * 10.0f);
+    float counter_steer_factor = 1.0f - gp_sigmoid(-(delta * wz_corr + 0.05f) * 40.0f);
 
     float ff_mz = kd * delta_dot * (vx_safe / 10.0f);
     float fb_mz = kp * wz_err + ki * state->wz_int + beta_term;
@@ -173,18 +185,16 @@ void gp_tv_step(
     t_ub_power[GP_RL] *= derate_rl;
     t_ub_power[GP_RR] *= derate_rr;
 
-    static float t_ub_rl_filt = 0.0f;
-    static float t_ub_rr_filt = 0.0f;
     float alpha_ub = GP_CLAMP(dt / (0.010f + dt), 0.0f, 1.0f);
     
-    t_ub_rl_filt += alpha_ub * (t_ub_friction[GP_RL] - t_ub_rl_filt);
-    t_ub_rr_filt += alpha_ub * (t_ub_friction[GP_RR] - t_ub_rr_filt);
+    state->t_ub_rl_filt += alpha_ub * (t_ub_friction[GP_RL] - state->t_ub_rl_filt);
+    state->t_ub_rr_filt += alpha_ub * (t_ub_friction[GP_RR] - state->t_ub_rr_filt);
 
     float t_ub[4];
     t_ub[GP_FL] = 0.0f;
     t_ub[GP_FR] = 0.0f;
-    t_ub[GP_RL] = GP_MIN(t_ub_rl_filt, t_ub_power[GP_RL]);
-    t_ub[GP_RR] = GP_MIN(t_ub_rr_filt, t_ub_power[GP_RR]);
+    t_ub[GP_RL] = GP_MIN(state->t_ub_rl_filt, t_ub_power[GP_RL]);
+    t_ub[GP_RR] = GP_MIN(state->t_ub_rr_filt, t_ub_power[GP_RR]);
 
     // Escudo de Fricción
     float max_sum = t_ub[GP_RL] + t_ub[GP_RR];
@@ -227,8 +237,13 @@ void gp_tv_step(
         t_cmd_out[i] = tv_final;
     }
 
-    gp_tc_step(t_cmd_out, omega, vx, vy, wz, fz_est, dt, &state->tc);
+    // Low-level TC Step
+    gp_tc_step(t_cmd_out, omega, vx, vy, wz_corr, fz_est, dt, &state->tc);
     
+    // Update EKF friction states using TC's measured surface slip forces
+    float t_mean_abs = 0.5f * (fabsf(t_cmd_out[GP_RL]) + fabsf(t_cmd_out[GP_RR]));
+    gp_ekf_update_friction(&state->ekf, state->tc.mu_surface[0], state->tc.mu_surface[1], t_mean_abs);
+
     for (int i = 0; i < 4; i++) {
         state->t_out_prev[i] = t_cmd_out[i];
     }
@@ -238,4 +253,8 @@ void gp_tv_step(
     g_tv_exec_cycles = end_cycles - start_cycles;
     g_tv_exec_us = ((float)g_tv_exec_cycles / 168000000.0f) * 1000000.0f; // 168 MHz
 #endif
+}
+
+size_t gp_tv_state_sizeof(void) {
+    return sizeof(tv_state_t);
 }

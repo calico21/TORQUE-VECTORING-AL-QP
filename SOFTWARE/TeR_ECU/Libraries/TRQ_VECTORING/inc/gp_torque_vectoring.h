@@ -5,6 +5,7 @@
 #include "gp_vehicle_model.h"
 #include "gp_solver.h"           // pulls in gp_params.h (GP_W_SMOOTH, GP_W_REG, ...)
 #include "gp_traction_control.h" // pulls in gp_params.h (GP_TC_KP, GP_TC_KI, ...)
+#include "gp_ekf.h"  // Unified EKF state estimator
 
 /* GP_W_SMOOTH / GP_W_REG / GP_TC_KP used to be redefined here a third time.
  * Removed: they are transitively available via the includes above, and
@@ -35,12 +36,19 @@ typedef struct {
     float t_qp_prev[4];
     float t_out_prev[4];
     tc_state_t tc;
-    float vy_est;     
+    gp_ekf_t ekf;
+    float vy_est;
     float alpha_qp;
     float lam_prev;
     float mz_sat_ratio;
-    float vy_gps_last;      // last GPS-derived lateral velocity [m/s]
-    float vy_gps_age_ms;    // time since last GPS fix update [ms]
+    float vy_gps_last;
+    float vy_gps_age_ms;
+    
+    // --- State-Isolated Filters (Prevents SIL Cross-Scenario Leakage) ---
+    float ax_filt;
+    float ay_filt;
+    float t_ub_rl_filt;
+    float t_ub_rr_filt;
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);

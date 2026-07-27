@@ -23,28 +23,66 @@ class TCState(ctypes.Structure):
         ("kappa_opt",       ctypes.c_float * 4),
     ]
 
-class TVState(ctypes.Structure):
+class GPEKFState(ctypes.Structure):
     _fields_ = [
-        ("wz_int", ctypes.c_float),
-        ("delta_prev", ctypes.c_float),
-        ("t_qp_prev", ctypes.c_float * 4),
-        ("t_out_prev", ctypes.c_float * 4),
-        ("tc", TCState),
-        ("vy_est", ctypes.c_float),
-        ("alpha_qp", ctypes.c_float),
-        ("lam_prev", ctypes.c_float),
-        ("mz_sat_ratio", ctypes.c_float),
-        ("vy_gps_last", ctypes.c_float),
-        ("vy_gps_age_ms", ctypes.c_float),
+        ("x",            ctypes.c_float * 4),
+        ("P",            (ctypes.c_float * 4) * 4),
+        ("Q",            ctypes.c_float * 4),
+        ("R_gps_vy",     ctypes.c_float),
+        ("R_pseudo_vy",  ctypes.c_float),
+        ("R_mu",         ctypes.c_float),
+        ("beta_est",     ctypes.c_float),
+        ("vy_std",       ctypes.c_float),
+        ("wz_corrected", ctypes.c_float),
     ]
 
-# Structural Safety Assertion (Prevents silent memory layout drift)
-assert ctypes.sizeof(TCState) == 42 * 4, f"TCState size mismatch: {ctypes.sizeof(TCState)} != {42*4}"
+class EkfState(ctypes.Structure):
+    _fields_ = [
+        ("x",            ctypes.c_float * 4),
+        ("P",            (ctypes.c_float * 4) * 4),
+        ("Q",            ctypes.c_float * 4),
+        ("delta_ref",    ctypes.c_float),      # <--- Added missing delta_ref field (4 bytes)
+        ("R_gps_vy",     ctypes.c_float),
+        ("R_pseudo_vy",  ctypes.c_float),
+        ("R_mu",         ctypes.c_float),
+        ("beta_est",     ctypes.c_float),
+        ("vy_std",       ctypes.c_float),
+        ("wz_corrected", ctypes.c_float),
+    ]
+
+class TVState(ctypes.Structure):
+    _fields_ = [
+        ("wz_int",         ctypes.c_float),
+        ("delta_prev",     ctypes.c_float),
+        ("t_qp_prev",      ctypes.c_float * 4),
+        ("t_out_prev",     ctypes.c_float * 4),
+        ("tc",             TCState),
+        ("ekf",            EkfState),
+        ("vy_est",         ctypes.c_float),
+        ("alpha_qp",       ctypes.c_float),
+        ("lam_prev",       ctypes.c_float),
+        ("mz_sat_ratio",   ctypes.c_float),
+        ("vy_gps_last",    ctypes.c_float),
+        ("vy_gps_age_ms",  ctypes.c_float),
+        ("ax_filt",        ctypes.c_float),   # new
+        ("ay_filt",        ctypes.c_float),   # new
+        ("t_ub_rl_filt",   ctypes.c_float),   # new
+        ("t_ub_rr_filt",   ctypes.c_float),   # new
+    ]
+
+# Structural Safety Assertions
+assert ctypes.sizeof(TCState) == 42 * 4, f"TCState size mismatch"
+
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')
 except OSError:
     print("Error: No se encuentra gp_core.so. Compila primero con gcc -shared...")
     exit(1)
+
+# Runtime size probe to guarantee layout synchronization
+gp_lib.gp_tv_state_sizeof.restype = ctypes.c_size_t
+assert ctypes.sizeof(TVState) == gp_lib.gp_tv_state_sizeof(), \
+    f"TVState layout drift: Python size ({ctypes.sizeof(TVState)}) != C size ({gp_lib.gp_tv_state_sizeof()})"
 
 # Firma actualizada para gp_tv_step (incluye vy_gps y gps_valid)
 gp_lib.gp_tv_step.argtypes = [
@@ -69,28 +107,71 @@ gp_lib.gp_tv_step.argtypes = [
 # NUEVO: Firma para gp_tv_init
 gp_lib.gp_tv_init.argtypes = [ctypes.POINTER(TVState)]
 
-def run_scenario(time_array, input_generator):
+# =====================================================================
+# 1.5. HARDWARE NON-IDEALITIES ENGINE (NOISE & LATENCY SIMULATOR)
+# =====================================================================
+class HardwareNonIdealities:
+    """Emulates EMI noise, sensor quantization, and CAN/Inverter transport delay."""
+    def __init__(self, delay_ticks=1, noise_std_imu=0.15, noise_std_wheel=2.5, noise_std_steer=0.003, seed=None):
+        self.delay_ticks = delay_ticks
+        self.noise_std_imu = noise_std_imu      # ay, ax in m/s^2, wz in rad/s
+        self.noise_std_wheel = noise_std_wheel  # wheel speed in rad/s (~24 RPM noise)
+        self.noise_std_steer = noise_std_steer  # steering angle in rad (~0.17 deg)
+        self.rng = np.random.default_rng(seed)
+        
+        # FIFO queue to delay inverter torque command feedback/actuation (1 tick = 5 ms)
+        self.cmd_buffer = [[0.0, 0.0, 0.0, 0.0] for _ in range(delay_ticks)]
+
+    def apply_sensor_noise(self, delta, wz, ay, ax, omega):
+        """Corrupts clean ground-truth inputs with Gaussian noise and quantization."""
+        delta_n = delta + self.rng.normal(0, self.noise_std_steer)
+        wz_n    = wz    + self.rng.normal(0, self.noise_std_imu * 0.1)
+        ay_n    = ay    + self.rng.normal(0, self.noise_std_imu)
+        ax_n    = ax    + self.rng.normal(0, self.noise_std_imu)
+
+        omega_n = [max(0.0, w + self.rng.normal(0, self.noise_std_wheel)) for w in omega]
+        
+        # 12-bit Analog/CAN Quantization simulation for steering angle
+        delta_n = np.round(delta_n / 0.0005) * 0.0005
+        return delta_n, wz_n, ay_n, ax_n, omega_n
+
+    def process_actuator_delay(self, t_cmd_out):
+        """Applies transport latency to outgoing inverter setpoints."""
+        if self.delay_ticks <= 0:
+            return t_cmd_out
+        self.cmd_buffer.append(list(t_cmd_out))
+        return self.cmd_buffer.pop(0)
+    
+def run_scenario(time_array, input_generator, non_idealities=None):
     state = TVState()
-    # ELIMINAR: ctypes.memset(ctypes.byref(state), 0, ctypes.sizeof(TVState))
-    gp_lib.gp_tv_init(ctypes.byref(state)) # <--- AÑADIDO: Llama a C directamente
+    gp_lib.gp_tv_init(ctypes.byref(state))
     state.tc.mu_surface[0] = 1.5
     state.tc.mu_surface[1] = 1.5
     
     t_rl_log, t_rr_log, tv_diff_log = [], [], []
+    dt = time_array[1] - time_array[0] if len(time_array) > 1 else 0.005
     
     for t in time_array:
-        # Ahora el generador debe devolver 9 valores (añadido brake_norm)
         fx, delta, vx, vy, wz, ay, ax, omega, brake = input_generator(t)
+        
+        # Inject physical noise if stress-testing mode is active
+        if non_idealities is not None:
+            delta, wz, ay, ax, omega = non_idealities.apply_sensor_noise(delta, wz, ay, ax, omega)
         
         omega_c = (ctypes.c_float * 4)(*omega)
         t_out_c = (ctypes.c_float * 4)()
         
         gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, 
-                          omega_c, brake, 60.0, 60.0, 0.0, 0, 0.005, ctypes.byref(state), t_out_c)
+                          omega_c, brake, 60.0, 60.0, 0.0, 0, dt, ctypes.byref(state), t_out_c)
         
-        t_rl_log.append(t_out_c[2])
-        t_rr_log.append(t_out_c[3])
-        tv_diff_log.append(t_out_c[3] - t_out_c[2])
+        # Extract torque output
+        t_out_processed = [t_out_c[0], t_out_c[1], t_out_c[2], t_out_c[3]]
+        if non_idealities is not None:
+            t_out_processed = non_idealities.process_actuator_delay(t_out_processed)
+            
+        t_rl_log.append(t_out_processed[2])
+        t_rr_log.append(t_out_processed[3])
+        tv_diff_log.append(t_out_processed[3] - t_out_processed[2])
         
     return np.array(t_rl_log), np.array(t_rr_log), np.array(tv_diff_log)
 
@@ -266,6 +347,73 @@ def generate_report(scenarios, titles, filename, super_title, time_steps):
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"✅ Generado: {output_path}")
     plt.close()
+
+# =====================================================================
+# MONTE CARLO STRESS-TESTING SUITE
+# =====================================================================
+def run_monte_carlo_suite(scenarios_dict, num_trials=25, delay_ticks=1):
+    """
+    Runs N randomized trials per scenario with sensor noise and latency to 
+    verify mathematical stability and limit-cycle resilience.
+    """
+    print(f"\n" + "="*80)
+    print(f"  STARTING MONTE CARLO STRESS SUITE ({num_trials} Trials/Scenario | Delay: {delay_ticks*5}ms)")
+    print("="*80)
+    
+    time_steps = np.linspace(0, 3.0, 600)
+    dt = time_steps[1] - time_steps[0]
+    
+    total_passes = 0
+    total_tests = len(scenarios_dict) * num_trials
+    
+    for name, scenario in scenarios_dict.items():
+        rms_list, hf_list, pass_count = [], [], 0
+        
+        for trial in range(num_trials):
+            hw = HardwareNonIdealities(delay_ticks=delay_ticks, seed=1000 + trial)
+            rl, rr, diff = run_scenario(time_steps, scenario, non_idealities=hw)
+            
+            # KPI Analysis
+            slew_rl = np.diff(rl) / dt
+            noise_rms = np.std(slew_rl)
+            
+            detrended = rl - np.linspace(rl[0], rl[-1], len(rl))
+            fft_vals = np.abs(np.fft.rfft(detrended * np.hanning(len(detrended))))
+            freqs = np.fft.rfftfreq(len(detrended), d=dt)
+            hf_energy = np.sum(fft_vals[freqs > 20.0])
+            
+            is_transient = any(
+                k in name
+                for k in [
+                    "Step Steer",
+                    "Hydroplaning",
+                    "Curb Strike",
+                    "Trail Braking",
+                    "Slalom",
+                    "G-Circle",
+                    "Skidpad",
+                ]
+            )
+            hf_limit = 25000.0 if is_transient else 3500.0
+            
+            if noise_rms < 4500.0 and hf_energy < hf_limit and np.max(np.abs(rl)) <= 600.0:
+                pass_count += 1
+                
+            rms_list.append(noise_rms)
+            hf_list.append(hf_energy)
+            
+        pass_rate = (pass_count / num_trials) * 100.0
+        total_passes += pass_count
+        
+        color = "\033[92m" if pass_rate >= 90.0 else ("\033[93m" if pass_rate >= 70.0 else "\033[91m")
+        reset = "\033[0m"
+        
+        print(f"{color}[{pass_rate:5.1f}% PASS]{reset} | {name:<42} | "
+              f"Mean RMS: {np.mean(rms_list):6.1f} | 95th-Pct HF: {np.percentile(hf_list, 95):7.1f}")
+        
+    overall_score = (total_passes / total_tests) * 100.0
+    print("="*80)
+    print(f"MONTE CARLO ROBUSTNESS SCORE: {overall_score:.2f}%\n")
 
 # =====================================================================
 # 5. SISTEMA LEGACY (RÉPLICA DE tv_mds.c PARA COMPARATIVA)
@@ -720,6 +868,16 @@ if __name__ == "__main__":
     
     generate_report(s11, t11, 'sanity_phase11_ultimate_performance.png', 
                     'Phase 11: AL-QP Race-Pace Analytics', time_steps)
+
+    # ------------------ SECTION F: MONTE CARLO NOISE & LATENCY ------------------
+    mc_scenarios = {
+        "14: Skidpad Transition (Center Figure-8)": scenario_skidpad_transition,
+        "22: High-Speed Step Steer (100 km/h)": scenario_step_steer_high_speed,
+        "23: G-Circle Spiral Mapping (Combined Slip)": scenario_friction_circle_mapping,
+        "25: Mid-Corner Curb Strike (Transient TC)": scenario_mid_corner_curb,
+        "28: Limit Slalom (Dynamic Degradation)": scenario_limit_slalom,
+    }
+    run_monte_carlo_suite(mc_scenarios, num_trials=30, delay_ticks=1)
 
     # --- Final KPIs ---
     _, rr_I, _ = run_scenario(time_steps, scenario_slalom)
