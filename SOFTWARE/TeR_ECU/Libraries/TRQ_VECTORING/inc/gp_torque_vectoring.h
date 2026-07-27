@@ -23,6 +23,12 @@
 #define GP_YAW_DEADZONE_RADS        0.0175f  // ~1.0 deg/s yaw rate deadzone
 #define GP_ACCEL_LPF_TAU            0.0200f  // 20ms LPF (8 Hz cutoff) for accelerometers
 
+// ── Profiling Telemetry Exports (Cortex-M Target Only) ────────────────
+#if defined(__arm__) || defined(__ARM_ARCH)
+extern volatile uint32_t g_tv_exec_cycles;
+extern volatile float g_tv_exec_us;
+#endif
+
 typedef struct {
     float wz_int;
     float delta_prev;

@@ -1,6 +1,23 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <math.h>
 #include "gp_torque_vectoring.h"
+
+// ── Embedded ARM Hardware Profiling (Compiles ONLY for STM32 Target) ─
+#if defined(__arm__) || defined(__ARM_ARCH)
+#include "stm32f4xx.h"
+
+volatile uint32_t g_tv_exec_cycles = 0;  // Measurable via ST-Link / STM32CubeIDE
+volatile float g_tv_exec_us = 0.0f;     // Microseconds spent in solver
+
+static inline void dwt_init_if_needed(void) {
+    if (!(CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk)) {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CYCCNT = 0;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+}
+#endif
 
 static const float Kp_map[16] = {
     100.0f, 150.0f, 250.0f, 300.0f,
@@ -48,6 +65,11 @@ void gp_tv_step(
     float temp_inv_rl, float temp_inv_rr, float vy_gps, uint8_t gps_valid,
     float dt, tv_state_t* state, float t_cmd_out[4]
 ) {
+#if defined(__arm__) || defined(__ARM_ARCH)
+    dwt_init_if_needed();
+    uint32_t start_cycles = DWT->CYCCNT;
+#endif
+
     if (vx < 1.0f && brake_norm > 0.5f && fx_driver > 500.0f) {
         t_cmd_out[GP_FL] = 0.0f; t_cmd_out[GP_FR] = 0.0f;
         t_cmd_out[GP_RL] = 15.0f; t_cmd_out[GP_RR] = 15.0f;
@@ -55,14 +77,20 @@ void gp_tv_step(
         state->tc.pi_integral[GP_RL] = 0.0f; state->tc.pi_integral[GP_RR] = 0.0f;
         state->t_out_prev[GP_RL] = 15.0f; state->t_out_prev[GP_RR] = 15.0f;
         state->t_qp_prev[GP_RL] = 15.0f; state->t_qp_prev[GP_RR] = 15.0f;
+
+#if defined(__arm__) || defined(__ARM_ARCH)
+        uint32_t end_cycles = DWT->CYCCNT;
+        g_tv_exec_cycles = end_cycles - start_cycles;
+        g_tv_exec_us = ((float)g_tv_exec_cycles / 168000000.0f) * 1000000.0f;
+#endif
         return; 
     }
 
-    // --- FIX #4: Deadzones on steering angle and yaw rate ---
+    // --- Deadzones on steering angle and yaw rate ---
     if (fabsf(delta) < GP_STEER_DEADZONE_RAD) { delta = 0.0f; }
     if (fabsf(wz) < GP_YAW_DEADZONE_RADS)     { wz = 0.0f;    }
 
-    // --- FIX #6: 1st-Order Low-Pass Filter on Accelerometer Signals ---
+    // --- 1st-Order Low-Pass Filter on Accelerometer Signals ---
     static float ax_filt = 0.0f;
     static float ay_filt = 0.0f;
     float alpha_lpf = GP_CLAMP(dt / (GP_ACCEL_LPF_TAU + dt), 0.0f, 1.0f);
@@ -71,7 +99,7 @@ void gp_tv_step(
 
     float vx_safe = GP_MAX(fabsf(vx), 0.5f);
     
-    // --- FIX #2: Fading-memory side-slip observer with active GPS fusion ---
+    // --- Fading-memory side-slip observer with active GPS fusion ---
     float vy_dot = ay_filt - (vx_safe * wz);
     float vy_ss = (GP_LR * wz) - ((GP_MASS * ay_filt * GP_LF * vx_safe) / (GP_WB * GP_C_ALPHA_R));
     float k_corr = 2.0f;
@@ -89,12 +117,10 @@ void gp_tv_step(
     state->vy_est += vy_corr * dt;
     vy = state->vy_est;
 
-    // Sideslip real del chasis, no solo yaw rate — necesario para DYC de 2 estados
     float beta = atan2f(vy, vx_safe);
 
     float fz_est[4];
     float fy_est[4];
-    // Use filtered accelerations to prevent chatter in friction bounds
     gp_estimate_fz(vx, ax_filt, ay_filt, fz_est);
     gp_estimate_fy(vx, vy, wz, delta, fz_est, fy_est);
     
@@ -108,7 +134,6 @@ void gp_tv_step(
     float ki = gp_bilinear_interp_4x4(Ki_map, v_norm, ay_norm);
     float kd = gp_bilinear_interp_4x4(Kd_map, v_norm, ay_norm);
 
-    // Gain scheduling por fricción: si el suelo da menos grip, pedimos menos Mz
     float mu_avg_prev = 0.5f * (state->tc.mu_surface[0] + state->tc.mu_surface[1]);
     float mu_scale = GP_CLAMP(mu_avg_prev / GP_MU_NOM, 0.4f, 1.0f);
     kp *= mu_scale;
@@ -118,7 +143,6 @@ void gp_tv_step(
     float delta_dot = (delta - state->delta_prev) / dt;
     state->delta_prev = delta;
 
-    // Realimentación de sideslip: término estabilizador proporcional a beta
     const float k_beta = 4000.0f;
     float beta_term = -k_beta * beta;
 
@@ -132,7 +156,6 @@ void gp_tv_step(
     float fb_mz = kp * wz_err + ki * state->wz_int + beta_term;
     float mz_req = GP_CLAMP((ff_mz + fb_mz) * os_gate * counter_steer_factor, -GP_TV_MAX_MZ, GP_TV_MAX_MZ);
     
-    // 7. Límites de los Neumáticos y LÍMITES TÉRMICOS (Derating)
     float t_lb[4] = {0.0f, 0.0f, 0.0f, 0.0f}; 
     float t_ub_friction[4];
     float t_ub_power[4];
@@ -142,7 +165,7 @@ void gp_tv_step(
     gp_friction_ellipse_t_ub(fz_est, fy_est, mu_avg, t_ub_friction);
     gp_power_limited_t_ub(omega, t_ub_power);
     
-    // --- DERATING TÉRMICO (Soft-Cut) ---
+    // Derating Térmico
     float temp_limit = 75.0f;
     float derate_rl = 1.0f - gp_sigmoid((temp_inv_rl - temp_limit) * 0.5f);
     float derate_rr = 1.0f - gp_sigmoid((temp_inv_rr - temp_limit) * 0.5f);
@@ -150,7 +173,6 @@ void gp_tv_step(
     t_ub_power[GP_RL] *= derate_rl;
     t_ub_power[GP_RR] *= derate_rr;
 
-    // --- FIX: 10ms LPF pre-filtering on friction bounds to stop active-set flapping ---
     static float t_ub_rl_filt = 0.0f;
     static float t_ub_rr_filt = 0.0f;
     float alpha_ub = GP_CLAMP(dt / (0.010f + dt), 0.0f, 1.0f);
@@ -164,7 +186,7 @@ void gp_tv_step(
     t_ub[GP_RL] = GP_MIN(t_ub_rl_filt, t_ub_power[GP_RL]);
     t_ub[GP_RR] = GP_MIN(t_ub_rr_filt, t_ub_power[GP_RR]);
 
-    // --- ESCUDO DE FRICCIÓN (Friction Budgeting) ---
+    // Escudo de Fricción
     float max_sum = t_ub[GP_RL] + t_ub[GP_RR];
     float req_sum = fx_driver * GP_R_WHEEL;
     if (req_sum > max_sum) {
@@ -187,7 +209,6 @@ void gp_tv_step(
         &qp_residual
     );
 
-    // Anti-windup por back-calculation
     float dt_req = t_nominal[GP_RR] - t_nominal[GP_RL];
     float dt_ach = qp_result[GP_RR] - qp_result[GP_RL];
     if (fabsf(dt_req) > 1.0f) {
@@ -197,17 +218,9 @@ void gp_tv_step(
     }
     
     float max_delta_t = GP_TV_RATE_LIMIT * dt;
-    float current_max_slew = 0.0f;
 
     for (int i = 0; i < 4; i++) {
         float delta_t = GP_CLAMP(qp_result[i] - state->t_qp_prev[i], -max_delta_t, max_delta_t);
-        
-        // Track true physical slew rate (Nm/s)
-        float slew_val = fabsf(delta_t) / dt;
-        if (slew_val > current_max_slew) {
-            current_max_slew = slew_val;
-        }
-
         float tv_final = state->t_qp_prev[i] + delta_t;
         
         state->t_qp_prev[i] = tv_final;
@@ -219,4 +232,10 @@ void gp_tv_step(
     for (int i = 0; i < 4; i++) {
         state->t_out_prev[i] = t_cmd_out[i];
     }
+
+#if defined(__arm__) || defined(__ARM_ARCH)
+    uint32_t end_cycles = DWT->CYCCNT;
+    g_tv_exec_cycles = end_cycles - start_cycles;
+    g_tv_exec_us = ((float)g_tv_exec_cycles / 168000000.0f) * 1000000.0f; // 168 MHz
+#endif
 }
