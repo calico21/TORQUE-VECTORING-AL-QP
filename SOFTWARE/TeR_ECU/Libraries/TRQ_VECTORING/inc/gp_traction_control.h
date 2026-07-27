@@ -7,14 +7,13 @@
 #define GP_TRACTION_CONTROL_H
 
 #include "gp_vehicle_model.h"
+#include "gp_params.h"  // GP_TC_KP, GP_TC_KI — canonical, see gp_params.h
 
-// ── Parámetros del Control de Tracción (Hoosier R20) ────────
+// ── Parámetros del Control de Tracción (Hoosier R20), NOT Bayesian-tuned ────
 #define GP_TC_B0             14.0f     // Rigidez Pacejka BCD sin carga
 #define GP_TC_B1             -0.0018f  // Sensibilidad a la carga de B
 #define GP_TC_C_PAC          1.65f     // Factor de forma C
 #define GP_TC_ALPHA_PEAK     0.20f     // [rad] Peak lateral slip angle (~11.5 deg)
-#define GP_TC_KP             25.271f     // Detuned Kp to prevent aggressive cuts fighting AL-QP
-#define GP_TC_KI             12.0f     // Detuned Ki to slow integral windup
 #define GP_TC_I_MAX          3.5f      // Saturación Anti-windup
 #define GP_TC_V_KP_SCALE     3.0f      // [m/s] Boost de Kp a baja velocidad
 #define GP_TC_ALPHA_KAPPA_LP 0.85f     // Increased LPF smoothing to reject slip noise spikes
@@ -41,21 +40,17 @@ typedef struct {
     float kappa_opt[4];    
 } tc_state_t;
 
-// ── Prototipos de funciones ─────────────────────────────────
-
-// Inicializa el estado del TC con valores por defecto
 void gp_tc_init(tc_state_t* state);
 
-// Ejecuta un paso del Traction Control (modifica t_req_out en el sitio)
 void gp_tc_step(
-    float t_req_out[4],       // In/Out: Torques demandados por el Torque Vectoring
-    const float omega[4],     // Velocidad angular de las ruedas [rad/s]
-    float vx,                 // Velocidad longitudinal [m/s]
-    float vy,                 // Velocidad lateral [m/s]
-    float wz,                 // Yaw rate [rad/s]
-    const float fz[4],        // Carga vertical por rueda [N]
-    float dt,                 // Delta time [s] (0.005 para 200Hz)
-    tc_state_t* state         // Puntero al estado del TC
+    float t_req_out[4],
+    const float omega[4],
+    float vx,
+    float vy,
+    float wz,
+    const float fz[4],
+    float dt,
+    tc_state_t* state
 );
 
 #endif // GP_TRACTION_CONTROL_H

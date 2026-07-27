@@ -1,7 +1,3 @@
-/*
- * gp_traction_control.c
- */
-
 #include "gp_traction_control.h"
 
 void gp_tc_init(tc_state_t* state) {
@@ -10,14 +6,12 @@ void gp_tc_init(tc_state_t* state) {
         state->kappa_filt[i] = 0.0f;
         state->omega_last_raw[i] = 0.0f;
         state->omega_prev_ema[i] = 0.0f;
-        
-        // Inicialización del Estimador RLS
-        state->rls_P[i] = 1000.0f;       // Alta incertidumbre inicial
-        state->rls_theta[i] = 30000.0f;  
-        state->theta_prev[i] = 30000.0f; 
+        state->rls_P[i] = 1000.0f;
+        state->rls_theta[i] = 30000.0f;
+        state->theta_prev[i] = 30000.0f;
         state->kappa_prev[i] = 0.0f;
         state->fx_prev[i] = 0.0f;
-        state->kappa_opt[i] = 0.12f;     // Slip target nominal inicial (12%)
+        state->kappa_opt[i] = 0.12f;
     }
     state->mu_surface[0] = GP_TC_MU_NOM;
     state->mu_surface[1] = GP_TC_MU_NOM;
@@ -35,7 +29,6 @@ static float gp_tc_combined_slip_factor(float vx, float vy, float wz) {
     float alpha_f = fabsf((vy + wz * GP_LF) / vx_safe);
     float alpha_r = fabsf((vy - wz * GP_LR) / vx_safe);
     float alpha_avg = 0.5f * (alpha_f + alpha_r);
-    
     float ratio = GP_CLAMP(alpha_avg / GP_TC_ALPHA_PEAK, 0.0f, 0.95f);
     return 1.0f / sqrtf(1.0f + ratio * ratio);
 }
@@ -103,17 +96,15 @@ void gp_tc_step(
         
         float kappa_raw = gp_tc_compute_kappa(omega[i], vx);
         
-        // Filtro LP del Slip Ratio
         float alpha_lp = 0.90f; 
         state->kappa_filt[i] = alpha_lp * state->kappa_filt[i] + (1.0f - alpha_lp) * kappa_raw;
         
-        // --- 1. OBSERVADOR RLS ---
-        float prev_k = state->kappa_prev[i]; // GUARDAMOS EL ESTADO REAL
+        float prev_k = state->kappa_prev[i];
         
         float d_kappa = state->kappa_filt[i] - prev_k; 
         float d_fx = fx_wheels[i] - state->fx_prev[i];
         
-        state->kappa_prev[i] = state->kappa_filt[i]; // Ahora podemos sobrescribir
+        state->kappa_prev[i] = state->kappa_filt[i];
         state->fx_prev[i] = fx_wheels[i];
         
         if (fabsf(d_kappa) > 0.0001f && vx > 2.0f) {
@@ -132,10 +123,8 @@ void gp_tc_step(
             state->rls_P[i] = GP_CLAMP((P - K * phi * P) / lambda, 10.0f, 10000.0f);
         }
         
-        // --- 2. GRADIENT ASCENT + SECANTE ---
         float dtheta = state->rls_theta[i] - state->theta_prev[i];
         
-        // Usamos el prev_k rescatado para calcular el intercepto real
         float kappa_secant = (prev_k * state->rls_theta[i] - 
                               state->kappa_filt[i] * state->theta_prev[i]) / 
                              (dtheta + copysignf(10.0f, dtheta));
@@ -150,7 +139,6 @@ void gp_tc_step(
                               
         state->theta_prev[i] = state->rls_theta[i];
         
-        // Target Híbrido: 50% Analítico (Seguridad) + 50% RLS (Adaptativo en vivo)
         float kappa_analytical = gp_tc_kappa_star(fz[i], state->mu_surface[w]) * cs_factor;
         float kappa_star = 0.5f * kappa_analytical + 0.5f * state->kappa_opt[i];
 

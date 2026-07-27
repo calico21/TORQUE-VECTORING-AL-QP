@@ -2,11 +2,7 @@
 #define GP_SOLVER_H
 
 #include "gp_vehicle_model.h"
-
-#define GP_QP_ITER    16
-#define GP_W_REG      0.405f   // Slightly relaxed tracking penalty
-#define GP_W_SMOOTH   5.787f   // Heavily increased slew-rate penalty to kill chattering
-#define GP_RHO_AL     5.0f   // Softened Augmented Lagrangian constraint enforcement
+#include "gp_params.h"   // GP_W_REG, GP_W_SMOOTH, GP_RHO_AL, GP_QP_ITER — canonical, see gp_params.h
 
 void gp_nominal_allocation(float fx_driver, float mz_target, float t_nom_out[4]);
 

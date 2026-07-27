@@ -3,13 +3,13 @@
 
 #include <stdint.h>
 #include "gp_vehicle_model.h"
-#include "gp_solver.h"
-#include "gp_traction_control.h"
+#include "gp_solver.h"           // pulls in gp_params.h (GP_W_SMOOTH, GP_W_REG, ...)
+#include "gp_traction_control.h" // pulls in gp_params.h (GP_TC_KP, GP_TC_KI, ...)
 
-// ── Bayesian-Optimized Controller Parameters ─────────────────────────
-#define GP_W_SMOOTH                 5.787f   // Actuator rate penalty weight
-#define GP_W_REG                    0.405f   // Torque regularization weight
-#define GP_TC_KP                    25.271f  // Traction control proportional gain
+/* GP_W_SMOOTH / GP_W_REG / GP_TC_KP used to be redefined here a third time.
+ * Removed: they are transitively available via the includes above, and
+ * gp_params.h is now the only file tune_weights.py needs to patch. See
+ * gp_params.h for rationale. */
 
 // Controller Limits & Thresholds
 #define GP_TV_MAX_MZ                1500.0f
