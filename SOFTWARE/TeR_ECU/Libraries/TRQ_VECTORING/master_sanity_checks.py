@@ -33,7 +33,9 @@ class TVState(ctypes.Structure):
         ("vy_est", ctypes.c_float),
         ("alpha_qp", ctypes.c_float),
         ("lam_prev", ctypes.c_float),
-        ("mz_sat_ratio", ctypes.c_float),  # <-- Anti-windup, debe coincidir 1:1 con tv_state_t
+        ("mz_sat_ratio", ctypes.c_float),
+        ("vy_gps_last", ctypes.c_float),    # Added to match C tv_state_t struct
+        ("vy_gps_age_ms", ctypes.c_float),  # Added to match C tv_state_t struct
     ]
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')
@@ -41,12 +43,24 @@ except OSError:
     print("Error: No se encuentra gp_core.so. Compila primero con gcc -shared...")
     exit(1)
 
-# Firma actualizada para gp_tv_step
+# Firma actualizada para gp_tv_step (incluye vy_gps y gps_valid)
 gp_lib.gp_tv_step.argtypes = [
-    ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float,
-    ctypes.c_float, ctypes.c_float, ctypes.POINTER(ctypes.c_float * 4), 
-    ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, 
-    ctypes.POINTER(TVState), ctypes.POINTER(ctypes.c_float * 4)
+    ctypes.c_float,                     # fx_driver
+    ctypes.c_float,                     # delta
+    ctypes.c_float,                     # vx
+    ctypes.c_float,                     # vy
+    ctypes.c_float,                     # wz
+    ctypes.c_float,                     # ay
+    ctypes.c_float,                     # ax
+    ctypes.POINTER(ctypes.c_float * 4), # omega
+    ctypes.c_float,                     # brake_norm
+    ctypes.c_float,                     # temp_inv_rl
+    ctypes.c_float,                     # temp_inv_rr
+    ctypes.c_float,                     # vy_gps
+    ctypes.c_uint8,                     # gps_valid
+    ctypes.c_float,                     # dt
+    ctypes.POINTER(TVState),            # state
+    ctypes.POINTER(ctypes.c_float * 4)  # t_out_c
 ]
 
 # NUEVO: Firma para gp_tv_init
@@ -69,7 +83,7 @@ def run_scenario(time_array, input_generator):
         t_out_c = (ctypes.c_float * 4)()
         
         gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, 
-                          omega_c, brake, 60.0, 60.0, 0.005, ctypes.byref(state), t_out_c)
+                          omega_c, brake, 60.0, 60.0, 0.0, 0, 0.005, ctypes.byref(state), t_out_c)
         
         t_rl_log.append(t_out_c[2])
         t_rr_log.append(t_out_c[3])
@@ -186,31 +200,47 @@ plt.rcParams.update({
 })
 
 def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, test_name):
-    """ Evalúa la señal matemática y decide si el coche sobrevive o rompe. """
-    # 1. Detección de Chattering (Ruido de alta frecuencia letal para el inversor)
-    slew_rate_rl = np.diff(t_rl) / (time_steps[1] - time_steps[0])
-    noise_rms = np.std(slew_rate_rl)
+    """ Evaluates the mathematical signal and strictly gates chattering. """
+    dt = time_steps[1] - time_steps[0]
     
-    # 2. Detección de Inestabilidad (Oscilación divergente o picos absurdos)
+    # 1. Base Slew Rate & Peak Detection
+    slew_rate_rl = np.diff(t_rl) / dt
+    noise_rms = np.std(slew_rate_rl)
     max_torque = np.max(np.abs(t_rl))
     
-    # 3. Criterios de Validación (Límites duros)
-    is_chattering = noise_rms > 5000.0  # Límite de slew rate "saludable"
-    is_exploding = max_torque > 600.0   # Más de 600 Nm por rueda es un error matemático
+    # 2. NEW: Zero-Crossing Rate (ZCR) of the derivative
+    # Counts how many times the controller reverses direction per second
+    sign_changes = np.where(np.diff(np.sign(slew_rate_rl)))[0]
+    zcr = len(sign_changes) / (time_steps[-1] - time_steps[0])
+    
+    # 3. NEW: High-Frequency Spectral Energy (FFT)
+    # Penalizes any control action happening faster than 20 Hz
+    fft_vals = np.abs(np.fft.rfft(t_rl))
+    freqs = np.fft.rfftfreq(len(t_rl), d=dt)
+    hf_energy = np.sum(fft_vals[freqs > 20.0]) 
+
+    # 4. NEW: Drivetrain Fatigue Index (Total absolute torque variation)
+    dfi = np.sum(np.abs(slew_rate_rl)) * dt
+    
+    # Strict Validation Criteria
+    is_exploding = max_torque > 600.0
+    is_chattering = noise_rms > 3000.0 or zcr > 40.0 or hf_energy > 500.0
     
     if is_exploding:
         status = "❌ FAIL (Divergencia)"
-        color = "\033[91m" # Rojo
+        color = "\033[91m"
     elif is_chattering:
         status = "⚠️ WARN (Chattering)"
-        color = "\033[93m" # Amarillo
+        color = "\033[93m"
     else:
         status = "✅ PASS"
-        color = "\033[92m" # Verde
+        color = "\033[92m"
         
     reset_color = "\033[0m"
-    print(f"{color}{status:<18} | {test_name:<42} | Ruido RMS: {noise_rms:7.1f} | Par Max: {max_torque:5.1f} Nm{reset_color}")
-
+    
+    # Print enhanced diagnostics
+    print(f"{color}{status:<18} | {test_name:<42}{reset_color}")
+    print(f"{color}   ↳ RMS: {noise_rms:6.1f} | ZCR: {zcr:5.1f} Hz | HF Energy: {hf_energy:6.1f} | DFI: {dfi:6.1f}{reset_color}")
 def generate_report(scenarios, titles, filename, super_title, time_steps):
     fig, axs = plt.subplots(2, 2, figsize=(15, 9))
     fig.suptitle(super_title, fontsize=16, fontweight='bold')
@@ -279,7 +309,7 @@ def run_comparison(time_array, input_generator):
         # Sistema Nuevo
         omega_c = (ctypes.c_float * 4)(*omega)
         t_out_c = (ctypes.c_float * 4)()
-        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake, 60.0, 60.0, 0.005, ctypes.byref(state_new), t_out_c)
+        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake, 60.0, 60.0, 0.0, 0, 0.005, ctypes.byref(state_new), t_out_c)
         
         # Sistema Antiguo
         old_rl, old_rr = legacy_tv.step(fx, delta, vx, wz, 0.005)

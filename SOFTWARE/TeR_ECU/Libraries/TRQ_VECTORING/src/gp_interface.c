@@ -13,6 +13,7 @@
 #define GP_KMH2MS   0.2777777778f
 #define GP_RPM2RADS 0.1047197551f
 #define GP_LOOPTIME 0.005f  // El bucle corre a 200Hz (5ms)
+#define GP_MAX_BRAKE_PRESSURE_BAR 50.0f
 
 // Memoria estática del controlador
 static tv_state_t gp_state;
@@ -46,9 +47,22 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     float total_torque_req = apps_norm * (float)limit;
     float fx_driver = total_torque_req / GP_R_WHEEL;
 
-    // Lectura y Conversión Sensórica
-    float vx = TeR.wheelInfo.speed * GP_KMH2MS;
-    float vy = 0.0f; 
+    // Lectura del Freno (en Bares de presión)
+    float brake_norm = (float)TeR.bpps.bpps / GP_MAX_BRAKE_PRESSURE_BAR;
+
+    // Lectura y Conversión Sensórica (Eje no motriz delantero + Fallback)
+    float vx = 0.0f;
+    uint32_t current_time_ms = HAL_GetTick();
+
+    // Primario: Usar rueda delantera no motriz si la trama CAN está reciente (< 50ms)
+    if ((current_time_ms - TeR.frontWheelInfo.last_rx_ms) < 50) {
+        vx = (float)TeR.frontWheelInfo.speed_kmh * GP_KMH2MS;
+    } else {
+        // Fallback: Promedio de ruedas traseras si la rueda delantera no está disponible
+        float rear_rpm_avg = 0.5f * ((float)TeR.wheelInfo.rl_rpm + (float)TeR.wheelInfo.rr_rpm);
+        vx = rear_rpm_avg * GP_RPM2RADS * GP_R_WHEEL;
+    }
+    float vy = 0.0f;
 
     float delta_volante = ter_steer_angle_decode(TeR.steer.angle) * GP_DEG2RAD;
     float delta_rueda = delta_volante / 5.0f;
@@ -61,20 +75,21 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
     omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
 
-    // Lectura del Freno (en Bares de presión)
-    #define MAX_BRAKE_PRESSURE_BAR 50.0f // must track TeR_CONSTANTS.h::MAX_BPPS_VALUE (kept local: TRQ_VECTORING scope excludes TeR_CONSTANTS.h)
-    float brake_norm = (float)TeR.bpps.bpps / MAX_BRAKE_PRESSURE_BAR;
     brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
 
     // Lectura de temperaturas de inverters
     float temp_inv_rl = (float)TeR.invInfo.left_power_stage_temp;
     float temp_inv_rr = (float)TeR.invInfo.right_power_stage_temp;
 
-    // Ejecución del núcleo matemático
+    // Datos GPS para observador de deriva (u-blox NEO-M9N)
+    float vy_gps = TeR.gps.vy_gps;
+    uint8_t gps_valid = ((HAL_GetTick() - TeR.gps.last_rx_ms) < 200) && TeR.gps.fix_valid;
+
+    // Ejecución del núcleo matemático con firma corregida
     float t_cmd_out[4] = {0.0f};
     gp_tv_step(fx_driver, delta_rueda, vx, vy, wz, ay, ax, 
                omega, brake_norm, temp_inv_rl, temp_inv_rr, 
-               GP_LOOPTIME, &gp_state, t_cmd_out);
+               vy_gps, gps_valid, GP_LOOPTIME, &gp_state, t_cmd_out);
 
     // Empaquetado de salida
     out_map.rLeft  = (trq_t)t_cmd_out[GP_RL];
@@ -84,6 +99,15 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     uint32_t end_ticks = DWT->CYCCNT;
     uint32_t execution_ticks = end_ticks - start_ticks;
     gp_execution_time_us = (float)execution_ticks / 168.0f; 
+
+    // --- EMPAQUETADO Y TRANSMISIÓN DE TELEMETRÍA CAN (IDs 0x100 - 0x103) ---
+    uint8_t can_dyn[8], can_tc[8], can_act[8], can_diag[8];
+    gp_pack_telemetry(&gp_state, gp_last_qp_residual, can_dyn, can_tc, can_act, can_diag);
+
+    TeR_CAN_Transmit(0x100, can_dyn, 8);
+    TeR_CAN_Transmit(0x101, can_tc, 8);
+    TeR_CAN_Transmit(0x102, can_act, 8);
+    TeR_CAN_Transmit(0x103, can_diag, 8);
 
     return out_map;
 }
@@ -157,4 +181,65 @@ void gp_pack_telemetry(
     // Bytes 4-7 reservados
     can_diag[4] = 0; can_diag[5] = 0;
     can_diag[6] = 0; can_diag[7] = 0;
+}
+
+trqMap_t gp_mode_intermediate_custom_req(float total_torque_req) {
+    // Iniciar contador de ciclos DWT
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint32_t start_ticks = DWT->CYCCNT;
+
+    trqMap_t out_map = {0, 0};
+    float fx_driver = total_torque_req / GP_R_WHEEL;
+
+    // Estimación de velocidad en eje no motriz
+    float vx = 0.0f;
+    uint32_t current_time_ms = HAL_GetTick();
+    if ((current_time_ms - TeR.frontWheelInfo.last_rx_ms) < 50) {
+        vx = (float)TeR.frontWheelInfo.speed_kmh * GP_KMH2MS;
+    } else {
+        float rear_rpm_avg = 0.5f * ((float)TeR.wheelInfo.rl_rpm + (float)TeR.wheelInfo.rr_rpm);
+        vx = rear_rpm_avg * GP_RPM2RADS * GP_R_WHEEL;
+    }
+    float vy = 0.0f;
+
+    float delta_volante = ter_steer_angle_decode(TeR.steer.angle) * GP_DEG2RAD;
+    float delta_rueda = delta_volante / 5.0f;
+
+    float wz = IMU.w_z * GP_DEG2RAD;
+    float ay = IMU.a_y;
+    float ax = IMU.a_x;
+
+    float omega[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
+    omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
+
+    float brake_norm = (float)TeR.bpps.bpps / GP_MAX_BRAKE_PRESSURE_BAR;
+    brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
+
+    float temp_inv_rl = (float)TeR.invInfo.left_power_stage_temp;
+    float temp_inv_rr = (float)TeR.invInfo.right_power_stage_temp;
+
+    float vy_gps = TeR.gps.vy_gps;
+    uint8_t gps_valid = ((HAL_GetTick() - TeR.gps.last_rx_ms) < 200) && TeR.gps.fix_valid;
+
+    float t_cmd_out[4] = {0.0f};
+    gp_tv_step(fx_driver, delta_rueda, vx, vy, wz, ay, ax,
+               omega, brake_norm, temp_inv_rl, temp_inv_rr,
+               vy_gps, gps_valid, GP_LOOPTIME, &gp_state, t_cmd_out);
+
+    out_map.rLeft  = (trq_t)t_cmd_out[GP_RL];
+    out_map.rRight = (trq_t)t_cmd_out[GP_RR];
+
+    uint8_t can_dyn[8], can_tc[8], can_act[8], can_diag[8];
+    gp_pack_telemetry(&gp_state, gp_last_qp_residual, can_dyn, can_tc, can_act, can_diag);
+    TeR_CAN_Transmit(0x100, can_dyn, 8);
+    TeR_CAN_Transmit(0x101, can_tc, 8);
+    TeR_CAN_Transmit(0x102, can_act, 8);
+    TeR_CAN_Transmit(0x103, can_diag, 8);
+
+    uint32_t end_ticks = DWT->CYCCNT;
+    gp_execution_time_us = (float)(end_ticks - start_ticks) / 168.0f;
+
+    return out_map;
 }

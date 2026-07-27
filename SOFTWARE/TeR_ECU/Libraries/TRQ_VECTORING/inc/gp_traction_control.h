@@ -13,11 +13,11 @@
 #define GP_TC_B1             -0.0018f  // Sensibilidad a la carga de B
 #define GP_TC_C_PAC          1.65f     // Factor de forma C
 #define GP_TC_ALPHA_PEAK     0.20f     // [rad] Peak lateral slip angle (~11.5 deg)
-#define GP_TC_KP             120.0f    // Ganancia Proporcional base
-#define GP_TC_KI             35.0f     // Ganancia Integral
+#define GP_TC_KP             45.0f     // Detuned Kp to prevent aggressive cuts fighting AL-QP
+#define GP_TC_KI             12.0f     // Detuned Ki to slow integral windup
 #define GP_TC_I_MAX          3.5f      // Saturación Anti-windup
 #define GP_TC_V_KP_SCALE     3.0f      // [m/s] Boost de Kp a baja velocidad
-#define GP_TC_ALPHA_KAPPA_LP 0.60f     // Filtro Pasa-bajos de medición de Slip
+#define GP_TC_ALPHA_KAPPA_LP 0.85f     // Increased LPF smoothing to reject slip noise spikes
 #define GP_TC_ALPHA_MU_EMA   0.008f    // Filtro EMA de superficie mu
 #define GP_TC_MU_LO          0.40f     // Límite inferior de estimación mu
 #define GP_TC_MU_HI          2.00f     // Límite superior de estimación mu

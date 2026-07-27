@@ -1,14 +1,21 @@
 #ifndef GP_TORQUE_VECTORING_H
 #define GP_TORQUE_VECTORING_H
 
+#include <stdint.h>
 #include "gp_vehicle_model.h"
 #include "gp_solver.h"
 #include "gp_traction_control.h"
 
-#define GP_TV_MAX_MZ         1500.0f
-#define GP_TV_WZ_I_MAX       200.0f
-#define GP_TV_RATE_LIMIT     5000.0f
-#define GP_TV_EMA_ALPHA      0.2f
+#define GP_TV_MAX_MZ                1500.0f
+#define GP_TV_WZ_I_MAX              200.0f
+#define GP_TV_RATE_LIMIT            5000.0f
+#define GP_TV_EMA_ALPHA             0.2f
+#define GP_MAX_BRAKE_PRESSURE_BAR   50.0f
+
+// Noise Gating & Signal Filtering Constants
+#define GP_STEER_DEADZONE_RAD       0.0087f  // ~0.5 deg steering angle deadzone
+#define GP_YAW_DEADZONE_RADS        0.0175f  // ~1.0 deg/s yaw rate deadzone
+#define GP_ACCEL_LPF_TAU            0.0200f  // 20ms LPF (8 Hz cutoff) for accelerometers
 
 typedef struct {
     float wz_int;
