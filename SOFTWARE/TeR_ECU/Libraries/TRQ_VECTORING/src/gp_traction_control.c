@@ -64,8 +64,13 @@ void gp_tc_step(
     fx_wheels[GP_RL] = fx_rl;
     fx_wheels[GP_RR] = fx_rr;
     
-    float mu_rl = fx_rl / GP_MAX(fz[GP_RL], 100.0f);
-    float mu_rr = fx_rr / GP_MAX(fz[GP_RR], 100.0f);
+    // Magnitude-based: mu is a grip-utilization ratio, not directionally
+    // signed. Signed fx/fz clamps every regen (negative fx) sample to
+    // GP_TC_MU_LO regardless of how much tire capacity was actually used,
+    // biasing the surface estimate on every braking event. fabsf makes the
+    // estimator equally informed by drive and regen.
+    float mu_rl = fabsf(fx_rl) / GP_MAX(fz[GP_RL], 100.0f);
+    float mu_rr = fabsf(fx_rr) / GP_MAX(fz[GP_RR], 100.0f);
     float mu_meas[2];
 
     mu_meas[0] = GP_CLAMP(mu_rl, GP_TC_MU_LO, GP_TC_MU_HI);
@@ -93,6 +98,14 @@ void gp_tc_step(
     
     for (int w = 0; w < 2; w++) {
         int i = rear_wheels[w];
+
+        // Capture the TV/regen command's sign BEFORE this function mutates
+        // t_req_out[i]. Everything below operates in magnitude space
+        // projected onto this sign axis, so ONE control law defends against
+        // wheelspin (sign_i > 0, identical to original behavior) and against
+        // regen lock-up (sign_i < 0, new) without duplicating any logic.
+        float sign_i = (t_req_out[i] < 0.0f) ? -1.0f : 1.0f;
+        float mag_in = fabsf(t_req_out[i]);
         
         float kappa_raw = gp_tc_compute_kappa(omega[i], vx);
         
@@ -139,10 +152,17 @@ void gp_tc_step(
                               
         state->theta_prev[i] = state->rls_theta[i];
         
+        // kappa_analytical / kappa_opt are magnitudes (>=0 by construction —
+        // see gp_tc_kappa_star's clamp and the [0.05,0.22] clamps above).
+        // Project BOTH the target and the measured slip onto the commanded
+        // direction (sign_i): this is what gives TC a lock-up guard under
+        // regen that's structurally identical to the wheelspin guard under
+        // drive, instead of a special-cased second control law.
         float kappa_analytical = gp_tc_kappa_star(fz[i], state->mu_surface[w]) * cs_factor;
-        float kappa_star = 0.5f * kappa_analytical + 0.5f * state->kappa_opt[i];
+        float kappa_target_mag = 0.5f * kappa_analytical + 0.5f * state->kappa_opt[i];
+        float kappa_meas_mag = sign_i * state->kappa_filt[i];
 
-        float error = state->kappa_filt[i] - kappa_star; 
+        float error = kappa_meas_mag - kappa_target_mag; 
         
         float raw_integral = state->pi_integral[i] + error * dt * speed_gate;
         state->pi_integral[i] = GP_TC_I_MAX * tanhf(raw_integral / GP_TC_I_MAX); 
@@ -156,13 +176,34 @@ void gp_tc_step(
         state->omega_last_raw[i] = omega[i];
         
         float error_gate = gp_sigmoid(error * 50.0f); 
-        float deriv_kick = 2.0f * (20.0f * gp_softplus((omega_dot - 250.0f) * 0.05f));
+        // Curb-strike / lock-up derivative kick, mirrored: the original term
+        // only caught a sudden POSITIVE omega spike (wheel launched off a
+        // curb -> wheelspin risk). Under regen the dangerous spike is a
+        // sudden NEGATIVE omega_dot (wheel snapping toward lock). sign_i
+        // selects which physical direction is being commanded this tick, so
+        // only the relevant branch can ever fire for a given wheel.
+        float deriv_kick_pos = 20.0f * gp_softplus((omega_dot - 250.0f) * 0.05f);
+        float deriv_kick_neg = 20.0f * gp_softplus((-omega_dot - 250.0f) * 0.05f);
+        float deriv_kick = 2.0f * ((sign_i > 0.0f) ? deriv_kick_pos : deriv_kick_neg);
 
         pi_out -= deriv_kick * error_gate; 
         
         float reduction = speed_gate * gp_softplus(pi_out * GP_TC_CLAMP_BETA) / GP_TC_CLAMP_BETA;
-        float t_cmd = t_req_out[i] - reduction;
-        
-        t_req_out[i] = gp_softplus(t_cmd * GP_TC_CLAMP_BETA) / GP_TC_CLAMP_BETA;
+
+        // Magnitude-space actuation gate: TC may only ever shrink the
+        // MAGNITUDE of the commanded torque toward zero — never invert its
+        // sign, never amplify it — for EITHER drive or regen. The original
+        // single-sided gp_softplus(t_cmd*BETA)/BETA implicitly assumed
+        // t_req_out[i] >= 0 and collapsed ANY negative (regen) command to
+        // ~0. Operating in |magnitude| and reapplying sign_i at the end
+        // reproduces the original behavior bit-for-bit when sign_i > 0 and
+        // correctly extends it to regen when sign_i < 0.
+        float mag_cmd = mag_in - reduction;
+        float mag_out = gp_softplus(mag_cmd * GP_TC_CLAMP_BETA) / GP_TC_CLAMP_BETA;
+
+        // Traction control may only maintain or reduce torque magnitude, never amplify it
+        mag_out = GP_MIN(mag_out, mag_in);
+
+        t_req_out[i] = sign_i * mag_out;
     }
 }

@@ -248,11 +248,17 @@ void gp_tv_step(
         t_lb[GP_RR] = 0.0f;
     }
 
-    // Escudo de Fricción
+    // Escudo de Fricción (drive side, unchanged)
     float max_sum = t_ub[GP_RL] + t_ub[GP_RR];
     float req_sum = fx_driver * GP_R_WHEEL;
     if (req_sum > max_sum) {
         fx_driver = max_sum / GP_R_WHEEL;
+    }
+    // Escudo de Fricción (regen side, mirrored): pre-clip fx_driver so the
+    // QP's nominal warmstart is itself physically achievable under braking.
+    float min_sum = t_lb[GP_RL] + t_lb[GP_RR];
+    if (req_sum < min_sum) {
+        fx_driver = min_sum / GP_R_WHEEL;
     }
 
     float t_nominal[4];
