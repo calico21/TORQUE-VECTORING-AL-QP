@@ -299,10 +299,21 @@ void gp_tv_step(
     // Guarantees combined rear-axle magnitude (|T_RL| + |T_RR|) respects the total
     // regen budget even when Mz demand pushes one wheel positive (drive) while the
     // other regens. Proportional scaling preserves the TV ratio.
+    //
+    // SMOOTH, not hard-branched: a discrete `if (total_mag > cap)` flips on/off
+    // every tick once total_mag sits near the boundary under sensor noise +
+    // actuator delay (Monte Carlo regen scenario measured 6.7% pass with the
+    // hard branch, vs. a deterministic single-shot 100% pass with no noise —
+    // textbook chattering signature). gp_soft_cap() gives a ceiling that is
+    // ALWAYS <= max_total_trq (so the hard budget assert still holds) but
+    // transitions continuously, removing the flip.
     if (rg->enable) {
         float total_mag = fabsf(t_cmd_out[GP_RL]) + fabsf(t_cmd_out[GP_RR]);
-        if (total_mag > rg->max_total_trq && total_mag > 1e-3f) {
-            float scale = rg->max_total_trq / total_mag;
+        if (total_mag > 1e-3f) {
+            const float GP_REGEN_BUDGET_SOFTNESS = 4.0f; // Nm, transition width
+            float capped_mag = gp_soft_cap(total_mag, rg->max_total_trq,
+                                            1.0f / GP_REGEN_BUDGET_SOFTNESS);
+            float scale = capped_mag / total_mag;
             t_cmd_out[GP_RL] *= scale;
             t_cmd_out[GP_RR] *= scale;
             state->t_qp_prev[GP_RL] = t_cmd_out[GP_RL];

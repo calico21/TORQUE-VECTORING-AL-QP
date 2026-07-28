@@ -28,4 +28,12 @@ float gp_bilinear_interp_4x4(const float table[16], float x_norm, float y_norm);
 // Aproximación rápida para el límite del Friction Ellipse
 float gp_softplus_sqrt(float x);
 
+// Smooth ceiling: y = gp_soft_cap(x, cap, beta) satisfies y < cap for ALL x
+// (strict, by construction — softplus(z) > 0 everywhere), y -> x for x << cap,
+// y -> cap for x >> cap, and is C1-continuous through the boundary. Use this
+// instead of `if (x > cap) scale = cap/x;` anywhere the trigger signal is
+// noisy near the boundary — the hard branch flips every tick under sensor
+// noise, this doesn't.
+float gp_soft_cap(float x, float cap, float beta);
+
 #endif // GP_MATH_H

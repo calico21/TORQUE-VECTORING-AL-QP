@@ -28,6 +28,11 @@ float gp_softplus_sqrt(float x) {
     return sqrtf(sp + 1e-6f);
 }
 
+// Smooth soft-min against a hard ceiling. See gp_math.h for guarantees.
+float gp_soft_cap(float x, float cap, float beta) {
+    return cap - gp_softplus((cap - x) * beta) / beta;
+}
+
 // Interpolación bilineal 4x4 extraída de _bilinear_interp_4x4
 float gp_bilinear_interp_4x4(const float table[16], float x_norm, float y_norm) {
     // Mapeamos [0, 1] a la cuadrícula 3x3 (índices 0 a 3)
