@@ -59,6 +59,11 @@ void gp_tv_init(tv_state_t* state) {
     state->t_ub_rl_filt = 0.0f;
     state->t_ub_rr_filt = 0.0f;
     
+    state->t_ub_rl_filt = 0.0f;
+    state->t_ub_rr_filt = 0.0f;
+    state->t_lb_rl_filt = 0.0f;
+    state->t_lb_rr_filt = 0.0f;
+
     float h = GP_W_REG + GP_W_SMOOTH;
     float a_sq = 2.0f / (GP_R_WHEEL * GP_R_WHEEL);
     state->alpha_qp = 1.0f / (h + GP_RHO_AL * a_sq);
@@ -72,8 +77,12 @@ void gp_tv_step(
     float fx_driver, float delta, float vx, float vy, float wz, 
     float ay, float ax, const float omega[4], float brake_norm, 
     float temp_inv_rl, float temp_inv_rr, float vy_gps, uint8_t gps_valid,
+    const gp_regen_limits_t* regen,
     float dt, tv_state_t* state, float t_cmd_out[4]
 ) {
+    gp_regen_limits_t regen_default = {1, 9999.0f, 999999.0f};
+    const gp_regen_limits_t* rg = regen ? regen : &regen_default;
+
 #if defined(__arm__) || defined(__ARM_ARCH)
     dwt_init_if_needed();
     uint32_t start_cycles = DWT->CYCCNT;
@@ -86,6 +95,7 @@ void gp_tv_step(
         state->tc.pi_integral[GP_RL] = 0.0f; state->tc.pi_integral[GP_RR] = 0.0f;
         state->t_out_prev[GP_RL] = 15.0f; state->t_out_prev[GP_RR] = 15.0f;
         state->t_qp_prev[GP_RL] = 15.0f; state->t_qp_prev[GP_RR] = 15.0f;
+        state->t_lb_rl_filt = 0.0f; state->t_lb_rr_filt = 0.0f;
 
 #if defined(__arm__) || defined(__ARM_ARCH)
         uint32_t end_cycles = DWT->CYCCNT;
@@ -168,8 +178,7 @@ void gp_tv_step(
     float fb_mz = kp * wz_err + ki * state->wz_int + beta_term;
     float mz_req = GP_CLAMP((ff_mz + fb_mz) * os_gate * counter_steer_factor, -GP_TV_MAX_MZ, GP_TV_MAX_MZ);
     
-    // FL = 0.0, FR = 0.0 (Un-driven front wheels), RL = -200.0 Nm, RR = -200.0 Nm (Regen bounds)
-    float t_lb[4] = {0.0f, 0.0f, -200.0f, -200.0f};
+    float t_lb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     float t_ub_friction[4];
     float t_ub_power[4];
     
@@ -178,7 +187,7 @@ void gp_tv_step(
     gp_friction_ellipse_t_ub(fz_est, fy_est, mu_avg, t_ub_friction);
     gp_power_limited_t_ub(omega, t_ub_power);
     
-    // Derating Térmico
+    // Derating Térmico (applies equally to drive AND regen — same silicon, same heat)
     float temp_limit = 75.0f;
     float derate_rl = 1.0f - gp_sigmoid((temp_inv_rl - temp_limit) * 0.5f);
     float derate_rr = 1.0f - gp_sigmoid((temp_inv_rr - temp_limit) * 0.5f);
@@ -196,6 +205,48 @@ void gp_tv_step(
     t_ub[GP_FR] = 0.0f;
     t_ub[GP_RL] = GP_MIN(state->t_ub_rl_filt, t_ub_power[GP_RL]);
     t_ub[GP_RR] = GP_MIN(state->t_ub_rr_filt, t_ub_power[GP_RR]);
+
+    // ── Regen (negative-torque) bound: mirror image of the drive-side logic ──
+    // Kamm's circle is sign-agnostic, so t_ub_friction (already computed
+    // above) doubles as the regen magnitude ceiling. Charge-power/thermal
+    // derating is regen's analogue of t_ub_power. Both are EMA-filtered at
+    // the SAME time constant as the drive bound so we don't introduce a
+    // differently-tuned, chatter-prone edge on the negative side.
+    if (rg->enable) {
+        float t_lb_power[4];
+        gp_power_limited_t_lb(omega, rg->max_charge_power_w, t_lb_power);
+        t_lb_power[GP_RL] *= derate_rl;
+        t_lb_power[GP_RR] *= derate_rr;
+
+        state->t_lb_rl_filt += alpha_ub * (t_ub_friction[GP_RL] - state->t_lb_rl_filt);
+        state->t_lb_rr_filt += alpha_ub * (t_ub_friction[GP_RR] - state->t_lb_rr_filt);
+
+        float lb_mag_rl = GP_MIN(state->t_lb_rl_filt, t_lb_power[GP_RL]);
+        float lb_mag_rr = GP_MIN(state->t_lb_rr_filt, t_lb_power[GP_RR]);
+
+        // Enforce the TOTAL regen budget (e.g. accumulator charge-current
+        // ceiling) by scaling BOTH wheels proportionally — never by clamping
+        // one wheel independently, which would destroy exactly the
+        // asymmetric split torque vectoring exists to create.
+        float mag_sum = lb_mag_rl + lb_mag_rr;
+        if (mag_sum > rg->max_total_trq && mag_sum > 1e-3f) {
+            float scale = rg->max_total_trq / mag_sum;
+            lb_mag_rl *= scale;
+            lb_mag_rr *= scale;
+        }
+
+        t_lb[GP_RL] = -lb_mag_rl;
+        t_lb[GP_RR] = -lb_mag_rr;
+    } else {
+        // Regen not currently allowed (steering off-center, cell V/T out of
+        // range, accumulator current maxed, etc.). Collapse to zero AND
+        // reset the filters so re-engagement ramps in cleanly instead of
+        // jumping from a stale value.
+        state->t_lb_rl_filt = 0.0f;
+        state->t_lb_rr_filt = 0.0f;
+        t_lb[GP_RL] = 0.0f;
+        t_lb[GP_RR] = 0.0f;
+    }
 
     // Escudo de Fricción
     float max_sum = t_ub[GP_RL] + t_ub[GP_RR];

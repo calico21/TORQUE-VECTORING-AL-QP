@@ -10,6 +10,8 @@
 #include "TeR_INERTIAL.h" 
 #include "TeR_CAN.h"      
 #include "stm32f4xx_hal.h"
+#include "TeR_CONSTANTS.h"    // ELEC2MECH_EFF
+#include "TeR_TRQMANAGER.h"   // regen_allowed()
 
 #define GP_DEG2RAD  0.0174532925f
 #define GP_KMH2MS   0.2777777778f
@@ -85,9 +87,19 @@ static inline void gp_execute_step_and_transmit(float fx_driver, trqMap_t *out_m
 
     // 4. EXECUTE CORE MATHEMATICAL TV/TC STEP
     float t_cmd_out[4] = {0.0f};
+    // 3.5 REGEN AUTHORITY — reuse the single safety-gate source of truth
+    // (steering deadzone, cell V/T, accumulator current) and translate the
+    // configurable regen current ceiling into an electrical charge-power
+    // budget for the TV solver's per-wheel regen shaping.
+    gp_regen_limits_t regen_limits;
+    regen_limits.enable = regen_allowed();
+    regen_limits.max_total_trq = (float)TeR.config.regen_max_trq;
+    regen_limits.max_charge_power_w =
+        (float)TeR.config.regen_max_current * GP_NOMINAL_PACK_VOLTAGE_V / ELEC2MECH_EFF;
     gp_tv_step(fx_driver, delta_rueda, vx, vy, wz, ay, ax, 
                omega, brake_norm, temp_inv_rl, temp_inv_rr, 
-               vy_gps, gps_valid, GP_LOOPTIME, &gp_state, t_cmd_out);
+               vy_gps, gps_valid, &regen_limits,
+               GP_LOOPTIME, &gp_state, t_cmd_out);
 
     // Map outputs to driver pipeline map
     out_map->rLeft  = (trq_t)t_cmd_out[GP_RL];

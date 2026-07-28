@@ -42,6 +42,7 @@ void gp_estimate_fz(float vx, float ax, float ay, float fz_out[4]);
 void gp_estimate_fy(float vx, float vy, float wz, float delta, const float fz[4], float fy_out[4]);
 void gp_friction_ellipse_t_ub(const float fz[4], const float fy_est[4], float mu_est, float t_ub_out[4]);
 void gp_power_limited_t_ub(const float omega_wheel[4], float t_ub_out[4]);
+void gp_power_limited_t_lb(const float omega_wheel[4], float p_max_charge_w, float t_lb_out[4]);
 float gp_adaptive_k_us(const float fz[4]);
 void gp_moment_arms(float arms_out[4]);
 

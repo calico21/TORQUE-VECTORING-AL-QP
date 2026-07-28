@@ -30,6 +30,19 @@ extern volatile uint32_t g_tv_exec_cycles;
 extern volatile float g_tv_exec_us;
 #endif
 
+// Regen authority, rebuilt every 5 ms tick by the caller (gp_interface.c).
+// `enable` mirrors the existing regen_allowed() safety gate (steering
+// deadzone, cell V/T, accumulator current) — the solver never re-implements
+// that logic. `max_total_trq` mirrors TeR.config.regen_max_trq (Nm,
+// magnitude, BOTH wheels combined). `max_charge_power_w` is the electrical
+// charge-power ceiling derived from TeR.config.regen_max_current, shaping
+// the per-wheel bound the same way GP_P_MAX_WHL shapes the drive-side bound.
+typedef struct {
+    uint8_t enable;
+    float   max_total_trq;
+    float   max_charge_power_w;
+} gp_regen_limits_t;
+
 typedef struct {
     float wz_int;
     float delta_prev;
@@ -49,6 +62,8 @@ typedef struct {
     float ay_filt;
     float t_ub_rl_filt;
     float t_ub_rr_filt;
+    float t_lb_rl_filt;   // NEW: filtered per-wheel regen (negative-torque) bound
+    float t_lb_rr_filt;   // NEW
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);
@@ -57,6 +72,7 @@ void gp_tv_step(
     float fx_driver, float delta, float vx, float vy, float wz, 
     float ay, float ax, const float omega[4], float brake_norm, 
     float temp_inv_rl, float temp_inv_rr, float vy_gps, uint8_t gps_valid,
+    const gp_regen_limits_t* regen,
     float dt, tv_state_t* state, float t_cmd_out[4]
 );
 

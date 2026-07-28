@@ -50,6 +50,13 @@ class EkfState(ctypes.Structure):
         ("wz_corrected", ctypes.c_float),
     ]
 
+class GPRegenLimits(ctypes.Structure):
+    _fields_ = [
+        ("enable",             ctypes.c_uint8),
+        ("max_total_trq",      ctypes.c_float),
+        ("max_charge_power_w", ctypes.c_float),
+    ]
+
 class TVState(ctypes.Structure):
     _fields_ = [
         ("wz_int",         ctypes.c_float),
@@ -68,6 +75,8 @@ class TVState(ctypes.Structure):
         ("ay_filt",        ctypes.c_float),   # new
         ("t_ub_rl_filt",   ctypes.c_float),   # new
         ("t_ub_rr_filt",   ctypes.c_float),   # new
+        ("t_lb_rl_filt",   ctypes.c_float),   # NEW: filtered regen (negative) bound RL
+        ("t_lb_rr_filt",   ctypes.c_float),   # NEW: filtered regen (negative) bound RR
     ]
 
 # Structural Safety Assertions
@@ -99,6 +108,7 @@ gp_lib.gp_tv_step.argtypes = [
     ctypes.c_float,                     # temp_inv_rr
     ctypes.c_float,                     # vy_gps
     ctypes.c_uint8,                     # gps_valid
+    ctypes.POINTER(GPRegenLimits),      # regen
     ctypes.c_float,                     # dt
     ctypes.POINTER(TVState),            # state
     ctypes.POINTER(ctypes.c_float * 4)  # t_out_c
@@ -142,11 +152,23 @@ class HardwareNonIdealities:
         self.cmd_buffer.append(list(t_cmd_out))
         return self.cmd_buffer.pop(0)
     
-def run_scenario(time_array, input_generator, non_idealities=None):
+def default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=40000.0):
+    """Generous, permissive regen envelope for tests not specifically exercising
+    the regen budget itself. Pass an explicit GPRegenLimits into run_scenario()/
+    run_comparison() to test a tightened budget instead."""
+    rg = GPRegenLimits()
+    rg.enable = enable
+    rg.max_total_trq = max_total_trq
+    rg.max_charge_power_w = max_charge_power_w
+    return rg
+
+def run_scenario(time_array, input_generator, non_idealities=None, regen_limits=None):
     state = TVState()
     gp_lib.gp_tv_init(ctypes.byref(state))
     state.tc.mu_surface[0] = 1.5
     state.tc.mu_surface[1] = 1.5
+
+    rg = regen_limits if regen_limits is not None else default_regen_limits()
     
     dt = time_array[1] - time_array[0] if len(time_array) > 1 else 0.005
     
@@ -164,7 +186,8 @@ def run_scenario(time_array, input_generator, non_idealities=None):
         t_out_c = (ctypes.c_float * 4)()
         
         gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, 
-                          omega_c, brake, 60.0, 60.0, 0.0, 0, dt, ctypes.byref(state), t_out_c)
+                          omega_c, brake, 60.0, 60.0, 0.0, 0, ctypes.byref(rg),
+                          dt, ctypes.byref(state), t_out_c)
         
         t_out_processed = [t_out_c[0], t_out_c[1], t_out_c[2], t_out_c[3]]
         if non_idealities is not None:
@@ -301,7 +324,21 @@ def scenario_anticipatory_tc(t):
     omega_rr = vx/0.2032 + ((t - 1.0) * 800.0) if 1.0 < t < 1.1 else vx/0.2032
     return 2000.0, 0.0, vx, 0.0, 0.0, 0.0, 5.0, [0, 0, omega_rl, omega_rr], 0.0
 
-
+def scenario_regen_tv_at_limit(t):
+    """29: Regen-TV At The Limit. Heavy trail-braking regen INTO a hard corner,
+    sized so the friction-derived split exceeds a TIGHT total regen budget —
+    exercises the proportional total-budget rescale (not independent
+    per-wheel clamping) that must preserve the asymmetric split."""
+    vx = 22.0
+    fx = -2600.0
+    delta = 0.55
+    wz = 1.1
+    ay = vx * wz
+    ax = fx / 250.0
+    w_rear = vx / 0.2032
+    omega = [0.0, 0.0, w_rear, w_rear]
+    brake = 0.0
+    return fx, delta, vx, 0.0, wz, ay, ax, omega, brake
 # =====================================================================
 # 4. MOTOR DE RENDERIZADO UNIFICADO
 # =====================================================================
@@ -474,13 +511,12 @@ class LegacyTV:
         nom = (fx_driver * 0.2032) / 2.0
         return nom - (d_torque / 2.0), nom + (d_torque / 2.0)
 
-def run_comparison(time_array, input_generator):
+def run_comparison(time_array, input_generator, regen_limits=None):
     state_new = TVState()
-    # ELIMINAR: ctypes.memset(ctypes.byref(state_new), 0, ctypes.sizeof(TVState))
-    gp_lib.gp_tv_init(ctypes.byref(state_new)) # <--- AÑADIDO: Llama a C directamente
+    gp_lib.gp_tv_init(ctypes.byref(state_new))
     state_new.tc.mu_surface[0] = 1.5
     state_new.tc.mu_surface[1] = 1.5
-    # ...
+    rg = regen_limits if regen_limits is not None else default_regen_limits()
     legacy_tv = LegacyTV()
     
     log = {'new_rl': [], 'new_rr': [], 'new_diff': [], 
@@ -492,7 +528,8 @@ def run_comparison(time_array, input_generator):
         # Sistema Nuevo
         omega_c = (ctypes.c_float * 4)(*omega)
         t_out_c = (ctypes.c_float * 4)()
-        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake, 60.0, 60.0, 0.0, 0, 0.005, ctypes.byref(state_new), t_out_c)
+        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake, 60.0, 60.0, 0.0, 0,
+                           ctypes.byref(rg), 0.005, ctypes.byref(state_new), t_out_c)
         
         # Sistema Antiguo
         old_rl, old_rr = legacy_tv.step(fx, delta, vx, wz, 0.005)
@@ -836,6 +873,38 @@ if __name__ == "__main__":
                     ['M: Launch Control (Pre-Tension)', 'N: Regenerative Torque Vectoring', 'O: Oversteer Rescue (Counter-Steer)', 'P: Anticipatory TC (Derivative Cut)'],
                     'sanity_phase4_advanced.png', 'Phase 4: Advanced Dynamics', time_steps)
 
+    # Explicit regression guard: Test N must show a genuine TV split under
+    # regen, not a flat/symmetric line (this was the original bug).
+    _, _, diff_N, _, _, _ = run_scenario(time_steps, scenario_regen_tv_entry)
+    assert np.max(np.abs(diff_N)) > 5.0, (
+        f"Regen-TV split collapsed to near-zero (max |diff|={np.max(np.abs(diff_N)):.2f} Nm) — "
+        f"the per-wheel regen bound is not shaping asymmetrically."
+    )
+    print(f"✅ Test N regen-TV split check: max |RR-RL| = {np.max(np.abs(diff_N)):.1f} Nm")
+
+    # New: regen-TV under a deliberately tight total budget — certifies the
+    # budget is enforced by proportional rescale (ratio preserved), not by
+    # independent per-wheel clamping (which would flatten the split).
+    tight_rg = default_regen_limits(enable=1, max_total_trq=60.0, max_charge_power_w=40000.0)
+    loose_rg = default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=40000.0)
+
+    rl_tight, rr_tight, diff_tight, *_ = run_scenario(time_steps, scenario_regen_tv_at_limit, regen_limits=tight_rg)
+    rl_loose, rr_loose, diff_loose, *_ = run_scenario(time_steps, scenario_regen_tv_at_limit, regen_limits=loose_rg)
+
+    budget_ok = np.all((np.abs(rl_tight) + np.abs(rr_tight)) <= 60.0 + 1e-1)
+    mask = np.abs(diff_loose) > 5.0
+    ratio_tight = np.abs(diff_tight[mask]) / (np.abs(rl_tight[mask]) + np.abs(rr_tight[mask]) + 1e-6)
+    ratio_loose = np.abs(diff_loose[mask]) / (np.abs(rl_loose[mask]) + np.abs(rr_loose[mask]) + 1e-6)
+    shape_preserved = np.mean(np.abs(ratio_tight - ratio_loose)) < 0.15
+
+    status = "✅ PASS" if (budget_ok and shape_preserved) else "❌ FAIL"
+    print(f"{status} | 29: Regen-TV At The Limit | Budget respected: {budget_ok} | Shape preserved: {shape_preserved}")
+    assert budget_ok, "Total regen budget exceeded — scale_neg_trq / regen bound rescale is broken."
+    assert shape_preserved, "Regen split collapsed toward symmetric under a tight budget — per-wheel clamping regression."
+
+    # ------------------ SECTION B: DOGFIGHT COMPARISONS ------------------
+    print("\nStarting Dogfight Comparisons (PD vs. AL-QP)...")
+
     # ------------------ SECTION B: DOGFIGHT COMPARISONS ------------------
     print("\nStarting Dogfight Comparisons (PD vs. AL-QP)...")
 
@@ -905,6 +974,7 @@ if __name__ == "__main__":
         "23: G-Circle Spiral Mapping (Combined Slip)": scenario_friction_circle_mapping,
         "25: Mid-Corner Curb Strike (Transient TC)": scenario_mid_corner_curb,
         "28: Limit Slalom (Dynamic Degradation)": scenario_limit_slalom,
+        "29: Regen-TV At The Limit": scenario_regen_tv_at_limit,
     }
     run_monte_carlo_suite(mc_scenarios, num_trials=30, delay_ticks=1)
 

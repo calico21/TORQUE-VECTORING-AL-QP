@@ -75,6 +75,16 @@ void gp_power_limited_t_ub(const float omega_wheel[4], float t_ub_out[4]) {
     }
 }
 
+void gp_power_limited_t_lb(const float omega_wheel[4], float p_max_charge_w, float t_lb_out[4]) {
+    for (int i = 0; i < 4; i++) {
+        // fabsf: unlike the drive-side function, regen must also be
+        // power-bounded correctly during rollback/near-zero-speed edge cases.
+        float omega_safe = gp_softplus(fabsf(omega_wheel[i]) * GP_R_WHEEL);
+        float t_power = p_max_charge_w / (omega_safe + 1e-3f);
+        t_lb_out[i] = GP_CLAMP(t_power, 0.0f, 2000.0f); // magnitude; caller applies the sign
+    }
+}
+
 float gp_adaptive_k_us(const float fz[4]) {
     float fz_front_mean = 0.5f * (fz[GP_FL] + fz[GP_FR]);
     float fz_rear_mean  = 0.5f * (fz[GP_RL] + fz[GP_RR]);

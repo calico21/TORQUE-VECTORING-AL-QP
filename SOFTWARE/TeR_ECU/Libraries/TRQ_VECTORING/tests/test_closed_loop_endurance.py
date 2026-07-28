@@ -10,6 +10,13 @@ gp = ctypes.CDLL(LIB_PATH)
 class TVStateBuffer(ctypes.Structure):
     _fields_ = [("raw_bytes", ctypes.c_uint8 * 4096)]
 
+class GPRegenLimits(ctypes.Structure):
+    _fields_ = [
+        ("enable",             ctypes.c_uint8),
+        ("max_total_trq",      ctypes.c_float),
+        ("max_charge_power_w", ctypes.c_float),
+    ]
+
 gp.gp_tv_init.argtypes = [ctypes.POINTER(TVStateBuffer)]
 
 def step_3dof_vehicle_physics(vx, vy, wz, t_rl, t_rr, delta, dt):
@@ -64,6 +71,7 @@ def test_20min_closed_loop_endurance():
 
     t_out = (ctypes.c_float * 4)()
     omega = (ctypes.c_float * 4)()
+    regen_limits = GPRegenLimits(1, 400.0, 40000.0)  # permissive — this test targets numerical stability, not budget enforcement
 
     for step_i in range(total_steps):
         t = step_i * dt
@@ -91,6 +99,7 @@ def test_20min_closed_loop_endurance():
             ctypes.c_float(50.0),           # temp RR
             ctypes.c_float(0.0),            # vy_gps
             ctypes.c_uint8(0),              # gps_valid
+            ctypes.byref(regen_limits),
             ctypes.c_float(dt),
             ctypes.byref(state_buf),
             t_out

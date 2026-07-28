@@ -27,4 +27,12 @@
 #define GP_TC_KP      25.271f  // Traction control proportional gain
 #define GP_TC_KI      12.0f    // Traction control integral gain
 
+// ── Regen / Torque-Vectoring-under-braking ──────────────────────────
+// Nominal accumulator pack voltage used ONLY to convert the configurable
+// regen current ceiling (TeR.config.regen_max_current, in Amps) into an
+// electrical charge-power ceiling for shaping the per-wheel regen bound.
+// TODO(team): replace with a live AMS pack-voltage decode once the exact
+// accessor is confirmed in ams.dbc. A fixed nominal is a safe, conservative
+// placeholder as long as it's not set above the pack's real minimum voltage.
+#define GP_NOMINAL_PACK_VOLTAGE_V   400.0f
 #endif // GP_PARAMS_H
