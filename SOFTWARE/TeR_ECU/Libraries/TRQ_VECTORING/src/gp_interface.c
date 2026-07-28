@@ -1,27 +1,29 @@
 /*
  * gp_interface.c
+ * Integration wrapper between AL-QP Torque Vectoring and TeR_TRQMANAGER
  */
 
 #include <stdint.h>
+#include <math.h>
 #include "gp_interface.h"
 #include "gp_torque_vectoring.h"
-#include "TeR_INERTIAL.h" // Para leer la IMU global
-#include "TeR_CAN.h"      // Para leer la estructura global del monoplaza
-#include "stm32f4xx_hal.h" // Necesario para acceder a los registros DWT y CoreDebug
+#include "TeR_INERTIAL.h" 
+#include "TeR_CAN.h"      
+#include "stm32f4xx_hal.h"
 
 #define GP_DEG2RAD  0.0174532925f
 #define GP_KMH2MS   0.2777777778f
 #define GP_RPM2RADS 0.1047197551f
-#define GP_LOOPTIME 0.005f  // El bucle corre a 200Hz (5ms)
+#define GP_LOOPTIME 0.005f  // 200 Hz loop (5 ms)
 #define GP_MAX_BRAKE_PRESSURE_BAR 50.0f
 
-// Memoria estática del controlador
+// Static controller state
 static tv_state_t gp_state;
 
-// Residual de la última ejecución del solver QP
+// Residual from the last QP solver execution
 static float gp_last_qp_residual = 0.0f;
 
-// Variable global para lectura desde Live Monitor o Debugger
+// Global execution time monitor (us)
 volatile float gp_execution_time_us = 0.0f;
 
 void gp_init(void) {
@@ -33,37 +35,35 @@ const tv_state_t* gp_get_state(void) {
     return &gp_state;
 }
 
-trqMap_t gp_mode_intermediate(trq_t limit) {
-    // 1. INICIAR CONTADOR DE CICLOS
+/* 
+ * Core execution pipeline: reads sensors, steps the control loop, 
+ * calculates MCU benchmarks, and queues CAN telemetry.
+ */
+static inline void gp_execute_step_and_transmit(float fx_driver, trqMap_t *out_map) {
+    // 1. START MCU CYCLE COUNTER BENCHMARK
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     uint32_t start_ticks = DWT->CYCCNT;
 
-    trqMap_t out_map = {0, 0};
+    // 2. READ PEDAL & BRAKE INPUTS
+    float brake_pressure_bar = ter_bpps_bpps_decode(TeR.bpps.bpps);
+    float brake_norm = brake_pressure_bar / GP_MAX_BRAKE_PRESSURE_BAR;
+    brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
 
-    // Lectura del Deseo del Piloto (APPS)
-    float apps_norm = (float)TeR.apps.apps_av / 255.0f;
-    apps_norm = GP_CLAMP(apps_norm, 0.0f, 1.0f);
-    float total_torque_req = apps_norm * (float)limit;
-    float fx_driver = total_torque_req / GP_R_WHEEL;
-
-    // Lectura del Freno (en Bares de presión)
-    float brake_norm = (float)TeR.bpps.bpps / GP_MAX_BRAKE_PRESSURE_BAR;
-
-    // Lectura y Conversión Sensórica (Eje no motriz delantero + Fallback)
+    // 3. READ SENSORS (Fixed to match TeR_CAN.h struct layout)
+    float front_v_kmh = ter_front_v_front_v_decode(TeR.speed.front_v);
     float vx = 0.0f;
-    uint32_t current_time_ms = HAL_GetTick();
 
-    // Primario: Usar rueda delantera no motriz si la trama CAN está reciente (< 50ms)
-    if ((current_time_ms - TeR.frontWheelInfo.last_rx_ms) < 50) {
-        vx = (float)TeR.frontWheelInfo.speed_kmh * GP_KMH2MS;
+    // Use non-driven front wheels for ground speed if available
+    if (front_v_kmh > 0.1f) {
+        vx = front_v_kmh * GP_KMH2MS;
     } else {
-        // Fallback: Promedio de ruedas traseras si la rueda delantera no está disponible
+        // Fallback: average rear driven wheel speeds
         float rear_rpm_avg = 0.5f * ((float)TeR.wheelInfo.rl_rpm + (float)TeR.wheelInfo.rr_rpm);
         vx = rear_rpm_avg * GP_RPM2RADS * GP_R_WHEEL;
     }
-    float vy = 0.0f;
 
+    float vy = 0.0f; // Tracked internally by EKF
     float delta_volante = ter_steer_angle_decode(TeR.steer.angle) * GP_DEG2RAD;
     float delta_rueda = delta_volante / 5.0f;
 
@@ -72,43 +72,61 @@ trqMap_t gp_mode_intermediate(trq_t limit) {
     float ax = IMU.a_x;             
 
     float omega[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
-    omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
+    omega[GP_RL] = (float)TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
+    omega[GP_RR] = (float)TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
 
-    brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
-
-    // Lectura de temperaturas de inverters
+    // Inverter power stage temperatures
     float temp_inv_rl = (float)TeR.invInfo.left_power_stage_temp;
     float temp_inv_rr = (float)TeR.invInfo.right_power_stage_temp;
 
-    // Datos GPS para observador de deriva (u-blox NEO-M9N)
-    float vy_gps = TeR.gps.vy_gps;
-    uint8_t gps_valid = ((HAL_GetTick() - TeR.gps.last_rx_ms) < 200) && TeR.gps.fix_valid;
+    // GPS lateral velocity from TeR.velbody (populated in TeR_GPS.c)
+    float vy_gps = ter_vel_body_v_y_decode(TeR.velbody.v_y);
+    uint8_t gps_valid = (fabsf(vy_gps) < 15.0f) ? 1 : 0;
 
-    // Ejecución del núcleo matemático con firma corregida
+    // 4. EXECUTE CORE MATHEMATICAL TV/TC STEP
     float t_cmd_out[4] = {0.0f};
     gp_tv_step(fx_driver, delta_rueda, vx, vy, wz, ay, ax, 
                omega, brake_norm, temp_inv_rl, temp_inv_rr, 
                vy_gps, gps_valid, GP_LOOPTIME, &gp_state, t_cmd_out);
 
-    // Empaquetado de salida
-    out_map.rLeft  = (trq_t)t_cmd_out[GP_RL];
-    out_map.rRight = (trq_t)t_cmd_out[GP_RR];
+    // Map outputs to driver pipeline map
+    out_map->rLeft  = (trq_t)t_cmd_out[GP_RL];
+    out_map->rRight = (trq_t)t_cmd_out[GP_RR];
 
-    // 2. PARAR CONTADOR Y CALCULAR TIEMPO (STM32F405 @ 168 MHz)
+    // 5. STOP BENCHMARK TIMER (STM32F405 @ 168 MHz)
     uint32_t end_ticks = DWT->CYCCNT;
     uint32_t execution_ticks = end_ticks - start_ticks;
     gp_execution_time_us = (float)execution_ticks / 168.0f; 
 
-    // --- EMPAQUETADO Y TRANSMISIÓN DE TELEMETRÍA CAN (IDs 0x100 - 0x103) ---
+    // 6. PACK AND DISPATCH TELEMETRY OVER CAN SCHEDULER
     uint8_t can_dyn[8], can_tc[8], can_act[8], can_diag[8];
     gp_pack_telemetry(&gp_state, gp_last_qp_residual, can_dyn, can_tc, can_act, can_diag);
 
-    TeR_CAN_Transmit(0x100, can_dyn, 8);
-    TeR_CAN_Transmit(0x101, can_tc, 8);
-    TeR_CAN_Transmit(0x102, can_act, 8);
-    TeR_CAN_Transmit(0x103, can_diag, 8);
+    can_scheduler_insert_non_periodic_msg(can_dyn,  8, CAN_ID_TV_DYNAMICS,   0);
+    can_scheduler_insert_non_periodic_msg(can_tc,   8, CAN_ID_TC_ESTIMATOR,  0);
+    can_scheduler_insert_non_periodic_msg(can_act,  8, CAN_ID_TV_ACTUATORS,  0);
+    can_scheduler_insert_non_periodic_msg(can_diag, 8, CAN_ID_TV_DIAGNOSTICS, 0);
+}
 
+trqMap_t gp_mode_intermediate(trq_t limit) {
+    trqMap_t out_map = {0, 0};
+
+    // Calculate requested force based on APPS pedal
+    float apps_norm = (float)ter_apps_apps_av_decode(TeR.apps.apps_av) / 100.0f;
+    apps_norm = GP_CLAMP(apps_norm, 0.0f, 1.0f);
+    
+    float total_torque_req = apps_norm * (float)limit;
+    float fx_driver = total_torque_req / GP_R_WHEEL;
+
+    gp_execute_step_and_transmit(fx_driver, &out_map);
+    return out_map;
+}
+
+trqMap_t gp_mode_intermediate_custom_req(float total_torque_req) {
+    trqMap_t out_map = {0, 0};
+    float fx_driver = total_torque_req / GP_R_WHEEL;
+
+    gp_execute_step_and_transmit(fx_driver, &out_map);
     return out_map;
 }
 
@@ -120,126 +138,52 @@ void gp_pack_telemetry(
     uint8_t can_act[8],
     uint8_t can_diag[8]
 ) {
-    // --- TRAMA 1: Dinámica y KKT (ID: 0x100) ---
-    // vy_est (Deriva Lateral) -> Escala * 100
+    // --- FRAME 1: Dynamics and KKT (ID: 0x100) ---
     int16_t vy_pack = (int16_t)(state->vy_est * 100.0f);
     can_dyn[0] = (vy_pack >> 8) & 0xFF; can_dyn[1] = vy_pack & 0xFF;
     
-    // Integral del Yaw Rate (wz_int) -> Escala * 100
     int16_t wz_int_pack = (int16_t)(state->wz_int * 100.0f);
     can_dyn[2] = (wz_int_pack >> 8) & 0xFF; can_dyn[3] = wz_int_pack & 0xFF;
 
-    // Kappa Target RL (RLS + Gradient Ascent) -> Escala * 10000
     uint16_t kopt_rl = (uint16_t)(state->tc.kappa_opt[GP_RL] * 10000.0f);
     can_dyn[4] = (kopt_rl >> 8) & 0xFF; can_dyn[5] = kopt_rl & 0xFF;
 
-    // Kappa Target RR -> Escala * 10000
     uint16_t kopt_rr = (uint16_t)(state->tc.kappa_opt[GP_RR] * 10000.0f);
     can_dyn[6] = (kopt_rr >> 8) & 0xFF; can_dyn[7] = kopt_rr & 0xFF;
 
-    // --- TRAMA 2: Observador RLS Pacejka (ID: 0x101) ---
-    // Theta RL (Pendiente) -> Escala / 10
+    // --- FRAME 2: RLS Pacejka Estimator (ID: 0x101) ---
     int16_t theta_rl = (int16_t)(state->tc.rls_theta[GP_RL] / 10.0f);
     can_tc[0] = (theta_rl >> 8) & 0xFF; can_tc[1] = theta_rl & 0xFF;
 
-    // Theta RR -> Escala / 10
     int16_t theta_rr = (int16_t)(state->tc.rls_theta[GP_RR] / 10.0f);
     can_tc[2] = (theta_rr >> 8) & 0xFF; can_tc[3] = theta_rr & 0xFF;
 
-    // Mu RL y RR -> Escala * 1000
     uint16_t mu_rl = (uint16_t)(state->tc.mu_surface[0] * 1000.0f);
     can_tc[4] = (mu_rl >> 8) & 0xFF; can_tc[5] = mu_rl & 0xFF;
+    
     uint16_t mu_rr = (uint16_t)(state->tc.mu_surface[1] * 1000.0f);
     can_tc[6] = (mu_rr >> 8) & 0xFF; can_tc[7] = mu_rr & 0xFF;
 
-    // --- TRAMA 3: Actuadores Físicos (ID: 0x102) ---
-    // Torque Comando RL (Lo que va al inversor) -> Escala * 10
+    // --- FRAME 3: Physical Actuators (ID: 0x102) ---
     int16_t trq_rl = (int16_t)(state->t_out_prev[GP_RL] * 10.0f);
     can_act[0] = (trq_rl >> 8) & 0xFF; can_act[1] = trq_rl & 0xFF;
 
-    // Torque Comando RR -> Escala * 10
     int16_t trq_rr = (int16_t)(state->t_out_prev[GP_RR] * 10.0f);
     can_act[2] = (trq_rr >> 8) & 0xFF; can_act[3] = trq_rr & 0xFF;
 
-    // Slip Actual Filtrado RL -> Escala * 10000
     uint16_t kfilt_rl = (uint16_t)(state->tc.kappa_filt[GP_RL] * 10000.0f);
     can_act[4] = (kfilt_rl >> 8) & 0xFF; can_act[5] = kfilt_rl & 0xFF;
 
-    // Slip Actual Filtrado RR -> Escala * 10000
     uint16_t kfilt_rr = (uint16_t)(state->tc.kappa_filt[GP_RR] * 10000.0f);
     can_act[6] = (kfilt_rr >> 8) & 0xFF; can_act[7] = kfilt_rr & 0xFF;
 
-    // --- TRAMA 4: Solver Diagnostics & Residual (ID: 0x103) [NUEVO] ---
-    // qp_residual (Residuo de igualdad KKT) -> Escala * 1000
+    // --- FRAME 4: Solver Diagnostics & Residual (ID: 0x103) ---
     uint16_t qp_pack = (uint16_t)(qp_residual * 1000.0f);
     can_diag[0] = (qp_pack >> 8) & 0xFF; can_diag[1] = qp_pack & 0xFF;
 
-    // alpha_qp (Paso de aprendizaje del AL-QP) -> Escala * 1e6
     int16_t alpha_pack = (int16_t)(state->alpha_qp * 1000000.0f);
     can_diag[2] = (alpha_pack >> 8) & 0xFF; can_diag[3] = alpha_pack & 0xFF;
 
-    // Bytes 4-7 reservados
     can_diag[4] = 0; can_diag[5] = 0;
     can_diag[6] = 0; can_diag[7] = 0;
-}
-
-trqMap_t gp_mode_intermediate_custom_req(float total_torque_req) {
-    // Iniciar contador de ciclos DWT
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    uint32_t start_ticks = DWT->CYCCNT;
-
-    trqMap_t out_map = {0, 0};
-    float fx_driver = total_torque_req / GP_R_WHEEL;
-
-    // Estimación de velocidad en eje no motriz
-    float vx = 0.0f;
-    uint32_t current_time_ms = HAL_GetTick();
-    if ((current_time_ms - TeR.frontWheelInfo.last_rx_ms) < 50) {
-        vx = (float)TeR.frontWheelInfo.speed_kmh * GP_KMH2MS;
-    } else {
-        float rear_rpm_avg = 0.5f * ((float)TeR.wheelInfo.rl_rpm + (float)TeR.wheelInfo.rr_rpm);
-        vx = rear_rpm_avg * GP_RPM2RADS * GP_R_WHEEL;
-    }
-    float vy = 0.0f;
-
-    float delta_volante = ter_steer_angle_decode(TeR.steer.angle) * GP_DEG2RAD;
-    float delta_rueda = delta_volante / 5.0f;
-
-    float wz = IMU.w_z * GP_DEG2RAD;
-    float ay = IMU.a_y;
-    float ax = IMU.a_x;
-
-    float omega[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    omega[GP_RL] = TeR.wheelInfo.rl_rpm * GP_RPM2RADS;
-    omega[GP_RR] = TeR.wheelInfo.rr_rpm * GP_RPM2RADS;
-
-    float brake_norm = (float)TeR.bpps.bpps / GP_MAX_BRAKE_PRESSURE_BAR;
-    brake_norm = GP_CLAMP(brake_norm, 0.0f, 1.0f);
-
-    float temp_inv_rl = (float)TeR.invInfo.left_power_stage_temp;
-    float temp_inv_rr = (float)TeR.invInfo.right_power_stage_temp;
-
-    float vy_gps = TeR.gps.vy_gps;
-    uint8_t gps_valid = ((HAL_GetTick() - TeR.gps.last_rx_ms) < 200) && TeR.gps.fix_valid;
-
-    float t_cmd_out[4] = {0.0f};
-    gp_tv_step(fx_driver, delta_rueda, vx, vy, wz, ay, ax,
-               omega, brake_norm, temp_inv_rl, temp_inv_rr,
-               vy_gps, gps_valid, GP_LOOPTIME, &gp_state, t_cmd_out);
-
-    out_map.rLeft  = (trq_t)t_cmd_out[GP_RL];
-    out_map.rRight = (trq_t)t_cmd_out[GP_RR];
-
-    uint8_t can_dyn[8], can_tc[8], can_act[8], can_diag[8];
-    gp_pack_telemetry(&gp_state, gp_last_qp_residual, can_dyn, can_tc, can_act, can_diag);
-    TeR_CAN_Transmit(0x100, can_dyn, 8);
-    TeR_CAN_Transmit(0x101, can_tc, 8);
-    TeR_CAN_Transmit(0x102, can_act, 8);
-    TeR_CAN_Transmit(0x103, can_diag, 8);
-
-    uint32_t end_ticks = DWT->CYCCNT;
-    gp_execution_time_us = (float)(end_ticks - start_ticks) / 168.0f;
-
-    return out_map;
 }

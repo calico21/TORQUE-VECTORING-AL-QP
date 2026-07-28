@@ -168,7 +168,8 @@ void gp_tv_step(
     float fb_mz = kp * wz_err + ki * state->wz_int + beta_term;
     float mz_req = GP_CLAMP((ff_mz + fb_mz) * os_gate * counter_steer_factor, -GP_TV_MAX_MZ, GP_TV_MAX_MZ);
     
-    float t_lb[4] = {0.0f, 0.0f, 0.0f, 0.0f}; 
+    // FL = 0.0, FR = 0.0 (Un-driven front wheels), RL = -200.0 Nm, RR = -200.0 Nm (Regen bounds)
+    float t_lb[4] = {0.0f, 0.0f, -200.0f, -200.0f};
     float t_ub_friction[4];
     float t_ub_power[4];
     

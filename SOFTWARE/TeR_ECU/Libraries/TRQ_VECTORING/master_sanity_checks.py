@@ -38,10 +38,10 @@ class GPEKFState(ctypes.Structure):
 
 class EkfState(ctypes.Structure):
     _fields_ = [
-        ("x",            ctypes.c_float * 4),
-        ("P",            (ctypes.c_float * 4) * 4),
-        ("Q",            ctypes.c_float * 4),
-        ("delta_ref",    ctypes.c_float),      # <--- Added missing delta_ref field (4 bytes)
+        ("x",            ctypes.c_float * 2),        # 2 states (vy, bw)
+        ("P",            (ctypes.c_float * 2) * 2),  # 2x2 Covariance
+        ("Q",            ctypes.c_float * 2),        # 2 Process noise values
+        ("delta_ref",    ctypes.c_float),
         ("R_gps_vy",     ctypes.c_float),
         ("R_pseudo_vy",  ctypes.c_float),
         ("R_mu",         ctypes.c_float),
@@ -148,13 +148,15 @@ def run_scenario(time_array, input_generator, non_idealities=None):
     state.tc.mu_surface[0] = 1.5
     state.tc.mu_surface[1] = 1.5
     
-    t_rl_log, t_rr_log, tv_diff_log = [], [], []
     dt = time_array[1] - time_array[0] if len(time_array) > 1 else 0.005
+    
+    # Logs
+    t_rl_log, t_rr_log, tv_diff_log = [], [], []
+    beta_log, alpha_qp_log, mz_sat_log = [], [], []
     
     for t in time_array:
         fx, delta, vx, vy, wz, ay, ax, omega, brake = input_generator(t)
         
-        # Inject physical noise if stress-testing mode is active
         if non_idealities is not None:
             delta, wz, ay, ax, omega = non_idealities.apply_sensor_noise(delta, wz, ay, ax, omega)
         
@@ -164,7 +166,6 @@ def run_scenario(time_array, input_generator, non_idealities=None):
         gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, 
                           omega_c, brake, 60.0, 60.0, 0.0, 0, dt, ctypes.byref(state), t_out_c)
         
-        # Extract torque output
         t_out_processed = [t_out_c[0], t_out_c[1], t_out_c[2], t_out_c[3]]
         if non_idealities is not None:
             t_out_processed = non_idealities.process_actuator_delay(t_out_processed)
@@ -173,7 +174,13 @@ def run_scenario(time_array, input_generator, non_idealities=None):
         t_rr_log.append(t_out_processed[3])
         tv_diff_log.append(t_out_processed[3] - t_out_processed[2])
         
-    return np.array(t_rl_log), np.array(t_rr_log), np.array(tv_diff_log)
+        # Internal C-kernel Telemetry Extraction
+        beta_log.append(state.ekf.beta_est)
+        alpha_qp_log.append(state.alpha_qp)
+        mz_sat_log.append(state.mz_sat_ratio)
+        
+    return (np.array(t_rl_log), np.array(t_rr_log), np.array(tv_diff_log), 
+            np.array(beta_log), np.array(alpha_qp_log), np.array(mz_sat_log))
 
 
 # =====================================================================
@@ -187,10 +194,19 @@ def scenario_ellipse(t):
     vx, ay = 20.0, t * 6.0 
     return 3000.0, 0.2, vx, 0.0, 0.5, ay, 0.0, [0, 0, vx/0.2032, vx/0.2032], 0.0
 
-def scenario_curb_shock(t):
-    vx = 15.0
-    omega_rr = (vx*1.5)/0.2032 if 1.0 < t < 1.5 else (vx*1.05)/0.2032
-    return 1500.0, 0.0, vx, 0.0, 0.0, 0.0, 5.0, [0, 0, (vx*1.05)/0.2032, omega_rr], 0.0
+def scenario_regen_reversal(t):
+    """ C: Rapid Regen-to-Drive Reversal (Zero-Crossing Backlash Test) """
+    vx = 22.0  # ~80 km/h
+    # Instantaneous shift from -2000 N (Max Regen) to +2500 N (Full Drive) at t = 1.0s
+    fx = -2000.0 if t < 1.0 else 2500.0
+    brake = 0.0
+    delta = 0.05
+    wz = 0.1
+    ay = 0.5
+    ax = fx / 250.0
+    w_rear = vx / 0.2032
+    omega = [0.0, 0.0, w_rear, w_rear]
+    return fx, delta, vx, 0.0, wz, ay, ax, omega, brake
 
 def scenario_divergence(t):
     vx, delta = 25.0, np.sin(t * 10) * 0.8 
@@ -218,9 +234,17 @@ def scenario_rollback(t):
     omega_base = max(vx, 0.0) / 0.2032 
     return 1500.0, 0.0, vx, 0.0, 0.0, 0.0, 3.0, [0, 0, omega_base, omega_base], 0.0
 
-def scenario_slalom(t):
-    vx, freq = 25.0, 0.5 * np.pi 
-    return 2000.0, 0.4 * np.sin(freq * t), vx, 0.0, 0.2 * np.sin(freq * t - 0.2), 8.0 * np.sin(freq * t - 0.1), 0.0, [0, 0, vx/0.2032, vx/0.2032], 0.0
+def scenario_steer_sensor_loss(t):
+    """ I: Mid-Corner Steering Encoder Loss (Kinematic Fallback Test) """
+    vx = 20.0  # 72 km/h
+    ay = 14.0  # 1.4G cornering
+    wz = ay / vx
+    # Steering encoder signal drops to 0 rad at t = 1.0s while pulling high lateral G
+    delta = 0.4 if t < 1.0 else 0.0
+    fx = 1500.0
+    w_rear = vx / 0.2032
+    omega = [0.0, 0.0, w_rear, w_rear]
+    return fx, delta, vx, 0.0, wz, ay, 0.0, omega, 0.0
 
 def scenario_trail_braking(t):
     vx = max(25.0 - 8.0 * t, 10.0) 
@@ -248,12 +272,17 @@ def scenario_launch_control(t):
     omega = [0, 0, vx/0.2032, vx/0.2032]
     return fx, 0.0, vx, 0.0, 0.0, 0.0, 8.0, omega, brake
 
-def scenario_aero_downforce(t):
-    """ N: Aceleración prolongada para ver cómo el t_ub crece con v^2 por la aerodinámica """
-    vx = t * 10.0 # De 0 a 30 m/s (108 km/h)
-    omega = [0, 0, vx/0.2032, vx/0.2032]
-    # Forzamos una demanda absurdamente alta para estar siempre saturando el t_ub
-    return 5000.0, 0.0, vx, 0.0, 0.0, 0.0, 0.0, omega, 0.0
+def scenario_regen_tv_entry(t):
+    """ N: Regenerative Torque Vectoring (Negative Torque Mz Allocation) """
+    vx = 20.0  # 72 km/h
+    fx = -2200.0  # Heavy regen braking demand
+    delta = 0.5   # Aggressive corner turn-in
+    wz = 0.9
+    ay = vx * wz
+    ax = fx / 250.0
+    w_rear = vx / 0.2032
+    omega = [0.0, 0.0, w_rear, w_rear]
+    return fx, delta, vx, 0.0, wz, ay, ax, omega, 0.0
 
 def scenario_oversteer_rescue(t):
     """ O: Coche sobrevirando a lo bestia. El piloto hace contravolante en t=1.0 """
@@ -283,11 +312,15 @@ plt.rcParams.update({
     'axes.labelcolor': 'black', 'xtick.color': 'black', 'ytick.color': 'black'
 })
 
-def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, test_name):
+def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, beta_log, alpha_log, test_name):
     dt = time_steps[1] - time_steps[0]
     slew_rate_rl = np.diff(t_rl) / dt
     noise_rms = np.std(slew_rate_rl)
     max_torque = np.max(np.abs(t_rl))
+    
+    # Internal C Metrics
+    max_beta_deg = np.degrees(np.max(np.abs(beta_log)))
+    avg_alpha_qp = np.mean(alpha_log)
     
     detrended = t_rl - np.linspace(t_rl[0], t_rl[-1], len(t_rl))
     window = np.hanning(len(detrended))
@@ -300,7 +333,6 @@ def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, test_name):
     sign_changes = np.where(np.diff(np.sign(slew_gated)))[0]
     zcr = len(sign_changes) / (time_steps[-1] - time_steps[0])
     
-    # Relax thresholds for known aggressive transient scenarios
     is_transient_test = any(k in test_name for k in ["Step Steer", "Hydroplaning", "Curb Strike", "Trail Braking", "Slalom", "G-Circle"])
     hf_limit = 20000.0 if is_transient_test else 1500.0
     zcr_limit = 70.0 if is_transient_test else 40.0
@@ -319,16 +351,19 @@ def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, test_name):
         color = "\033[92m"
               
     reset_color = "\033[0m"
-    print(f"{color}{status:<18} | {test_name:<42} | RMS: {noise_rms:5.1f} | ZCR: {zcr:4.1f}Hz | HF: {hf_energy:5.1f}{reset_color}")
+    print(f"{color}{status:<18} | {test_name:<40} | MaxBeta: {max_beta_deg:4.1f}° | α_qp: {avg_alpha_qp:4.2f} | RMS: {noise_rms:5.1f}{reset_color}")
 
 def generate_report(scenarios, titles, filename, super_title, time_steps):
     fig, axs = plt.subplots(2, 2, figsize=(15, 9))
     fig.suptitle(super_title, fontsize=16, fontweight='bold')
     
     for ax, (scenario, title) in zip(axs.flat, zip(scenarios, titles)):
-        rl, rr, diff = run_scenario(time_steps, scenario)
-        # NUEVA LÍNEA: Imprimir diagnóstico numérico por terminal
-        evaluate_test_kpis(time_steps, rl, rr, diff, title)
+        # Unpack all 6 returned telemetry arrays
+        rl, rr, diff, beta, alpha_qp, mz_sat = run_scenario(time_steps, scenario)
+        
+        # Pass telemetry into KPI evaluator
+        evaluate_test_kpis(time_steps, rl, rr, diff, beta, alpha_qp, title)
+        
         ax.plot(time_steps, rl, color='#0052cc', linewidth=2.5, label='RL Torque (Nm)')
         ax.plot(time_steps, rr, color='#e60000', linewidth=2.5, linestyle='--', label='RR Torque (Nm)')
         
@@ -371,7 +406,8 @@ def run_monte_carlo_suite(scenarios_dict, num_trials=25, delay_ticks=1):
         
         for trial in range(num_trials):
             hw = HardwareNonIdealities(delay_ticks=delay_ticks, seed=1000 + trial)
-            rl, rr, diff = run_scenario(time_steps, scenario, non_idealities=hw)
+            # Unpack first 3 outputs and ignore remainder
+            rl, rr, diff, *_ = run_scenario(time_steps, scenario, non_idealities=hw)
             
             # KPI Analysis
             slew_rl = np.diff(rl) / dt
@@ -746,24 +782,17 @@ def scenario_variable_grip_launch(t):
     brake = 0.0
     return fx, delta, vx, vy, wz, ay, ax, omega, brake
 
-def scenario_trail_braking_apex(t):
-    """27: Trail Braking. Transición de saturación longitudinal a lateral."""
-    # Frena fuerte, luego va dando gas
-    fx = 0.0 if t < 1.5 else min((t - 1.5) * 2500.0, 2000.0)
-    brake = max(1.0 - t, 0.0) # Suelta el freno progresivamente de t=0 a t=1
-    
-    # Empieza a girar el volante justo mientras suelta el freno
-    delta = min(t * 0.8, 1.2) if t < 2.0 else 1.2 
-    
-    vx = max(25.0 - (t * 10.0), 12.0) if t < 1.5 else min(12.0 + (t-1.5)*5.0, 20.0)
-    vy = 0.0
-    wz = delta * 1.1
-    ay = vx * wz
-    ax = -12.0 if brake > 0 else (fx / 250.0)
-    
-    w_rear = vx / 0.23
+def scenario_spinout_recovery_limit(t):
+    """ 27: Catastrophic Spinout Snap (High-Speed Oversteer Saturation Limit) """
+    vx = 25.0  # 90 km/h
+    # Severe spin-out at t = 1.0s: yaw rate spikes to 2.5 rad/s (~143 deg/s)
+    wz = 0.2 if t < 1.0 else 2.5
+    delta = 0.1 if t < 1.0 else -0.8  # Full violent counter-steer lock
+    ay = vx * wz if t < 1.0 else 20.0
+    fx = 500.0
+    w_rear = vx / 0.2032
     omega = [0.0, 0.0, w_rear, w_rear]
-    return fx, delta, vx, vy, wz, ay, ax, omega, brake
+    return fx, delta, vx, 0.0, wz, ay, 0.0, omega, 0.0
 
 def scenario_limit_slalom(t):
     """28: Slalom de velocidad creciente. Hasta que el chasis no pueda más."""
@@ -791,34 +820,34 @@ if __name__ == "__main__":
     print("\nStarting Sanity Checks Battery (Master V5.2)...")
     
     # ------------------ SECTION A: STANDARD VALIDATION ------------------
-    generate_report([scenario_launch, scenario_ellipse, scenario_curb_shock, scenario_divergence],
-                    ['A: Dead-Stop Launch (Div/0 Protect)', 'B: Friction Ellipse Saturation', 'C: Traction Control (Curb Shock)', 'D: Solver Stability (Impossible Mz)'],
+    generate_report([scenario_launch, scenario_ellipse, scenario_regen_reversal, scenario_divergence],
+                    ['A: Dead-Stop Launch (Div/0 Protect)', 'B: Friction Ellipse Saturation', 'C: Regen-to-Drive Zero Crossing', 'D: Solver Stability (Impossible Mz)'],
                     'sanity_phase1_core.png', 'Phase 1: Core Physics', time_steps)
     
     generate_report([scenario_mu_split, scenario_sensor_glitch, scenario_liftoff, scenario_rollback],
                     ['E: Mu-Split Asymmetric Loss', 'F: CAN Bus Glitch Resilience', 'G: Lift-off Oversteer Rate Limit', 'H: Rollback / Negative Velocity'],
                     'sanity_phase2_edge_cases.png', 'Phase 2: Edge Cases', time_steps)
     
-    generate_report([scenario_slalom, scenario_trail_braking, scenario_resonance, scenario_porpoising],
-                    ['I: Slalom TV Dynamic Tracking', 'J: Trail Braking Entry', 'K: Driveline Resonance (15Hz)', 'L: Suspension Porpoising (4Hz)'],
+    generate_report([scenario_steer_sensor_loss, scenario_trail_braking, scenario_resonance, scenario_porpoising],
+                    ['I: Steering Encoder Drop (IMU Fallback)', 'J: Trail Braking Entry', 'K: Driveline Resonance (15Hz)', 'L: Suspension Porpoising (4Hz)'],
                     'sanity_phase3_performance.png', 'Phase 3: High Performance', time_steps)
     
-    generate_report([scenario_launch_control, scenario_aero_downforce, scenario_oversteer_rescue, scenario_anticipatory_tc],
-                    ['M: Launch Control (Pre-Tension)', 'N: Aero-Aware Downforce (Speed Sweep)', 'O: Oversteer Rescue (Counter-Steer)', 'P: Anticipatory TC (Derivative Cut)'],
+    generate_report([scenario_launch_control, scenario_regen_tv_entry, scenario_oversteer_rescue, scenario_anticipatory_tc],
+                    ['M: Launch Control (Pre-Tension)', 'N: Regenerative Torque Vectoring', 'O: Oversteer Rescue (Counter-Steer)', 'P: Anticipatory TC (Derivative Cut)'],
                     'sanity_phase4_advanced.png', 'Phase 4: Advanced Dynamics', time_steps)
 
     # ------------------ SECTION B: DOGFIGHT COMPARISONS ------------------
     print("\nStarting Dogfight Comparisons (PD vs. AL-QP)...")
 
     # Phase 5: Lateral Dynamics (Comparing Torque Delta for Agility)
-    s5 = [scenario_slalom, scenario_oversteer_rescue, scenario_ellipse, scenario_divergence]
+    s5 = [scenario_limit_slalom, scenario_oversteer_rescue, scenario_ellipse, scenario_divergence]
     t5 = ['1: Slalom Agility (TV Dynamic Range)', '2: Oversteer Rescue (Counter-Steer Override)', 
           '3: Friction Ellipse (Lateral G Saturation)', '4: Solver Stability vs PID Windup']
     generate_comparison_report(s5, t5, 'sanity_phase5_dogfight_lateral.png', 
                                'Phase 5: Lateral Dynamics & Handling (PD vs. AL-QP)', time_steps, 'lateral')
 
     # Phase 6: Longitudinal Dynamics (Comparing Assigned Torque on Right Wheel)
-    s6 = [scenario_launch_control, scenario_anticipatory_tc, scenario_aero_downforce, scenario_mu_split]
+    s6 = [scenario_launch_control, scenario_anticipatory_tc, scenario_vmax_aero_drag, scenario_mu_split]
     t6 = ['5: Launch Control (Pre-Tensioning)', '6: Anticipatory TC vs Blind Power', 
           '7: Aero-Downforce Scaling', '8: Mu-Split (Ice Patch Survival)']
     generate_comparison_report(s6, t6, 'sanity_phase6_dogfight_traction.png', 
@@ -862,9 +891,9 @@ if __name__ == "__main__":
     # ------------------ SECTION E: ULTIMATE PERFORMANCE ------------------
     print("\nStarting Phase 11: Ultimate Performance & Race-Pace Analytics...")
 
-    s11 = [scenario_mid_corner_curb, scenario_variable_grip_launch, scenario_trail_braking_apex, scenario_limit_slalom]
+    s11 = [scenario_mid_corner_curb, scenario_variable_grip_launch, scenario_spinout_recovery_limit, scenario_limit_slalom]
     t11 = ['25: Mid-Corner Curb Strike (Transient TC/TV)', '26: Variable Grip Launch (Pacejka Tracking)', 
-           '27: Aggressive Trail Braking (Combined Saturation)', '28: Limit Slalom (Dynamic Degration)']
+           '27: High-Speed Spinout Recovery Limit', '28: Limit Slalom (Dynamic Degradation)']
     
     generate_report(s11, t11, 'sanity_phase11_ultimate_performance.png', 
                     'Phase 11: AL-QP Race-Pace Analytics', time_steps)
@@ -880,10 +909,12 @@ if __name__ == "__main__":
     run_monte_carlo_suite(mc_scenarios, num_trials=30, delay_ticks=1)
 
     # --- Final KPIs ---
-    _, rr_I, _ = run_scenario(time_steps, scenario_slalom)
-    _, rr_K, _ = run_scenario(time_steps, scenario_resonance)
+    rl_I, rr_I, diff_I, beta_I, alpha_I, _ = run_scenario(time_steps, scenario_limit_slalom)
+    rl_K, rr_K, diff_K, beta_K, alpha_K, _ = run_scenario(time_steps, scenario_resonance)
     
     print("\n--- KEY PERFORMANCE INDICATORS (KPIs) ---")
     print(f"Max Control Effort (TV Slew Rate): {np.max(np.abs(np.diff(rr_I) / 0.005)):.1f} Nm/s")
     print(f"Driveline Noise Transmissibility: {np.std(rr_K[100:500]):.2f} Nm RMS")
+    print(f"Max Vehicle Sideslip (Slalom):    {np.degrees(np.max(np.abs(beta_I))):.2f}°")
+    print(f"Mean Solver Feasibility Factor:  {np.mean(alpha_I):.3f}")
     print("\n✅ All comparisons generated successfully in 2x2 format. Check the output/ folder.\n")
