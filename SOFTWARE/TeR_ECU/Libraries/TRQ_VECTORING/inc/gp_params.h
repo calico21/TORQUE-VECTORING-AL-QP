@@ -19,12 +19,12 @@
  * needs to write.
  * ============================================================================ */
 
-#define GP_W_SMOOTH   5.787f   // Actuator rate penalty weight
-#define GP_W_REG      0.405f   // Torque regularization weight
+#define GP_W_SMOOTH   10.799f   // Actuator rate penalty weight
+#define GP_W_REG      0.256f   // Torque regularization weight
 #define GP_RHO_AL     5.0f     // Augmented Lagrangian constraint enforcement
 #define GP_QP_ITER    16       // Fixed AL-QP iteration count -> deterministic O(1)
 
-#define GP_TC_KP      25.271f  // Traction control proportional gain
+#define GP_TC_KP      26.989f  // Traction control proportional gain
 #define GP_TC_KI      12.0f    // Traction control integral gain
 
 // ── Regen / Torque-Vectoring-under-braking ──────────────────────────

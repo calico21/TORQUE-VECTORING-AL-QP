@@ -15,7 +15,7 @@
 // Controller Limits & Thresholds
 #define GP_TV_MAX_MZ                1500.0f
 #define GP_TV_WZ_I_MAX              200.0f
-#define GP_TV_RATE_LIMIT            5000.0f
+#define GP_TV_RATE_LIMIT            3252.3f
 #define GP_TV_EMA_ALPHA             0.2f
 #define GP_MAX_BRAKE_PRESSURE_BAR   50.0f
 

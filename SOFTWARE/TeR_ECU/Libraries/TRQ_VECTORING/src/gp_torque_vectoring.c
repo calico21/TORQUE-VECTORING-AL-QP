@@ -228,9 +228,23 @@ void gp_tv_step(
         // ceiling) by scaling BOTH wheels proportionally — never by clamping
         // one wheel independently, which would destroy exactly the
         // asymmetric split torque vectoring exists to create.
+        //
+        // SMOOTH, not hard-branched: this bound feeds DIRECTLY into the QP's
+        // box constraint t_lb[], which then warm-starts next tick's solve
+        // via t_qp_prev. At the limit, the friction-derived regen capacity
+        // sits at/above the budget almost continuously, so a hard
+        // mag_sum>budget branch here flips the SOLVER'S FEASIBLE REGION
+        // every tick under sensor noise — worse than chattering the final
+        // output (post-solve rescale below), because it changes what the
+        // solver itself converges to and that error compounds through the
+        // warm-start. gp_soft_cap gives the same strict ceiling
+        // (capped_sum < max_total_trq always) with no discontinuity.
         float mag_sum = lb_mag_rl + lb_mag_rr;
-        if (mag_sum > rg->max_total_trq && mag_sum > 1e-3f) {
-            float scale = rg->max_total_trq / mag_sum;
+        if (mag_sum > 1e-3f) {
+            const float GP_REGEN_BOUND_SOFTNESS = 4.0f; // Nm, transition width
+            float capped_sum = gp_soft_cap(mag_sum, rg->max_total_trq,
+                                            1.0f / GP_REGEN_BOUND_SOFTNESS);
+            float scale = capped_sum / mag_sum;
             lb_mag_rl *= scale;
             lb_mag_rr *= scale;
         }

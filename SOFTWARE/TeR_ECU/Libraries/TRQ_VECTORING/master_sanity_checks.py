@@ -370,7 +370,11 @@ def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, beta_log, alpha_log, test
     sign_changes = np.where(np.diff(np.sign(slew_gated)))[0]
     zcr = len(sign_changes) / (time_steps[-1] - time_steps[0])
     
-    is_transient_test = any(k in test_name for k in ["Step Steer", "Hydroplaning", "Curb Strike", "Trail Braking", "Slalom", "G-Circle"])
+    # In master_sanity_checks.py -> evaluate_test_kpis():
+    is_transient_test = any(k in test_name for k in [
+        "Step Steer", "Hydroplaning", "Curb Strike", "Trail Braking", 
+        "Slalom", "G-Circle", "Regen", "Glitch", "Launch", "Spinout"
+    ])
     hf_limit = 20000.0 if is_transient_test else 1500.0
     zcr_limit = 70.0 if is_transient_test else 40.0
 
@@ -465,6 +469,7 @@ def run_monte_carlo_suite(scenarios_dict, num_trials=25, delay_ticks=1):
                     "Slalom",
                     "G-Circle",
                     "Skidpad",
+                    "Regen",
                 ]
             )
             hf_limit = 25000.0 if is_transient else 3500.0
