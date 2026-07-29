@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <math.h>
 #include "gp_torque_vectoring.h"
+#include "gp_params.h"
 
 // ── Embedded ARM Hardware Profiling (Compiles ONLY for STM32 Target) ─
 #if defined(__arm__) || defined(__ARM_ARCH)
@@ -241,9 +242,8 @@ void gp_tv_step(
         // (capped_sum < max_total_trq always) with no discontinuity.
         float mag_sum = lb_mag_rl + lb_mag_rr;
         if (mag_sum > 1e-3f) {
-            const float GP_REGEN_BOUND_SOFTNESS = 4.0f; // Nm, transition width
             float capped_sum = gp_soft_cap(mag_sum, rg->max_total_trq,
-                                            1.0f / GP_REGEN_BOUND_SOFTNESS);
+                                            1.0f / GP_REGEN_SOFTNESS);
             float scale = capped_sum / mag_sum;
             lb_mag_rl *= scale;
             lb_mag_rr *= scale;
@@ -309,27 +309,38 @@ void gp_tv_step(
         t_cmd_out[i] = tv_final;
     }
 
-    // Post-solver coupled proportional rescale:
-    // Guarantees combined rear-axle magnitude (|T_RL| + |T_RR|) respects the total
-    // regen budget even when Mz demand pushes one wheel positive (drive) while the
-    // other regens. Proportional scaling preserves the TV ratio.
+    // Post-solver regen-budget rescale — magnitude-only on the NEGATIVE
+    // component, sign-preserving on the positive one.
     //
-    // SMOOTH, not hard-branched: a discrete `if (total_mag > cap)` flips on/off
-    // every tick once total_mag sits near the boundary under sensor noise +
-    // actuator delay (Monte Carlo regen scenario measured 6.7% pass with the
-    // hard branch, vs. a deterministic single-shot 100% pass with no noise —
-    // textbook chattering signature). gp_soft_cap() gives a ceiling that is
-    // ALWAYS <= max_total_trq (so the hard budget assert still holds) but
-    // transitions continuously, removing the flip.
+    // The prior version rescaled by (|T_RL|+|T_RR|), which conflates drive
+    // and regen magnitude. At any TV operating point where one wheel drives
+    // and the other regens simultaneously (e.g. trailing-throttle mid-corner
+    // lift, or TV pushing one wheel negative while the other stays positive
+    // to hold Mz), that formulation clamps DRIVE torque to satisfy a budget
+    // that is only physically meaningful for the regenerating wheel(s) —
+    // the charge-current ceiling has no bearing on how much the inverter can
+    // motor. Scoping the rescale to min(T_i, 0) matches the pre-solve
+    // t_lb[] derivation above, which never had this defect.
+    //
+    // SMOOTH, not hard-branched: identical gp_soft_cap() rationale as
+    // before — a discrete `if (neg_mag > cap)` flips every tick once neg_mag
+    // sits near the boundary under sensor noise. gp_soft_cap() gives a
+    // ceiling that is ALWAYS <= max_total_trq but transitions continuously.
     if (rg->enable) {
-        float total_mag = fabsf(t_cmd_out[GP_RL]) + fabsf(t_cmd_out[GP_RR]);
-        if (total_mag > 1e-3f) {
-            const float GP_REGEN_BUDGET_SOFTNESS = 4.0f; // Nm, transition width
-            float capped_mag = gp_soft_cap(total_mag, rg->max_total_trq,
-                                            1.0f / GP_REGEN_BUDGET_SOFTNESS);
-            float scale = capped_mag / total_mag;
-            t_cmd_out[GP_RL] *= scale;
-            t_cmd_out[GP_RR] *= scale;
+        float neg_rl = GP_MIN(t_cmd_out[GP_RL], 0.0f);
+        float neg_rr = GP_MIN(t_cmd_out[GP_RR], 0.0f);
+        float neg_mag = fabsf(neg_rl) + fabsf(neg_rr);
+
+        if (neg_mag > 1e-3f) {
+            float capped_mag = gp_soft_cap(neg_mag, rg->max_total_trq,
+                                            1.0f / GP_REGEN_SOFTNESS);
+            float scale = capped_mag / neg_mag;
+
+            // Only the regenerating (negative) side is touched; any
+            // simultaneous drive (positive) torque passes through untouched.
+            if (t_cmd_out[GP_RL] < 0.0f) t_cmd_out[GP_RL] *= scale;
+            if (t_cmd_out[GP_RR] < 0.0f) t_cmd_out[GP_RR] *= scale;
+
             state->t_qp_prev[GP_RL] = t_cmd_out[GP_RL];
             state->t_qp_prev[GP_RR] = t_cmd_out[GP_RR];
         }

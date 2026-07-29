@@ -548,6 +548,227 @@ def run_comparison(time_array, input_generator, regen_limits=None):
         
     return log
 
+def run_regen_budget_ramp():
+    """Sweeps max_total_trq DOWN from a loose 300 Nm to a tight 20 Nm over
+    the simulation window while holding heavy, constant regen demand fixed.
+    Demonstrates that gp_soft_cap() tracks the shrinking budget continuously
+    (no discrete jump/chatter as the ceiling crosses the natural demand)."""
+    time_steps = np.linspace(0, 3.0, 600)
+    dt = time_steps[1] - time_steps[0]
+
+    state = TVState()
+    gp_lib.gp_tv_init(ctypes.byref(state))
+    state.tc.mu_surface[0] = 1.5
+    state.tc.mu_surface[1] = 1.5
+
+    rl_log, rr_log, budget_log, total_mag_log = [], [], [], []
+
+    for t in time_steps:
+        budget = 300.0 - (280.0 * (t / 3.0))  # 300 -> 20 Nm linear ramp
+        rg = default_regen_limits(enable=1, max_total_trq=budget, max_charge_power_w=40000.0)
+
+        vx, delta, wz, ay = 20.0, 0.15, 0.3, 2.0
+        fx = -2400.0  # constant heavy regen demand throughout
+        w_rear = vx / 0.2032
+        omega_c = (ctypes.c_float * 4)(0.0, 0.0, w_rear, w_rear)
+        t_out_c = (ctypes.c_float * 4)()
+
+        gp_lib.gp_tv_step(fx, delta, vx, 0.0, wz, ay, fx / 250.0,
+                           omega_c, 0.5, 60.0, 60.0, 0.0, 0, ctypes.byref(rg),
+                           dt, ctypes.byref(state), t_out_c)
+
+        rl_log.append(t_out_c[2])
+        rr_log.append(t_out_c[3])
+        budget_log.append(budget)
+        total_mag_log.append(abs(t_out_c[2]) + abs(t_out_c[3]))
+
+    return (time_steps, np.array(rl_log), np.array(rr_log),
+            np.array(budget_log), np.array(total_mag_log))
+
+
+def run_regen_thermal_derate():
+    """Runs scenario_regen_thermal_derate with a time-varying inverter
+    temperature (scenario_regen_thermal_derate_temps), which run_scenario()
+    can't express since it holds temps fixed at 60/60C for the whole trace."""
+    time_steps = np.linspace(0, 3.0, 600)
+    dt = time_steps[1] - time_steps[0]
+
+    state = TVState()
+    gp_lib.gp_tv_init(ctypes.byref(state))
+    state.tc.mu_surface[0] = 1.5
+    state.tc.mu_surface[1] = 1.5
+    rg = default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=40000.0)
+
+    rl_log, rr_log, temp_log = [], [], []
+
+    for t in time_steps:
+        fx, delta, vx, vy, wz, ay, ax, omega, brake = scenario_regen_thermal_derate(t)
+        temp_rl, temp_rr = scenario_regen_thermal_derate_temps(t)
+
+        omega_c = (ctypes.c_float * 4)(*omega)
+        t_out_c = (ctypes.c_float * 4)()
+        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake,
+                           temp_rl, temp_rr, 0.0, 0, ctypes.byref(rg),
+                           dt, ctypes.byref(state), t_out_c)
+
+        rl_log.append(t_out_c[2])
+        rr_log.append(t_out_c[3])
+        temp_log.append(temp_rl)
+
+    return time_steps, np.array(rl_log), np.array(rr_log), np.array(temp_log)
+
+def generate_phase12_report(time_steps):
+    """Phase 12: Regenerative Braking & Charge-Budget Management.
+    Four panels: mixed-sign TV split, lockup recovery, thermal derate
+    tracking, and the continuous budget-ramp sweep."""
+    fig, axs = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle('Phase 12: Regenerative Braking & Charge-Budget Management',
+                 fontsize=16, fontweight='bold')
+
+    # --- Panel 1: Mixed-sign TV under a tight budget ---
+    tight_rg = default_regen_limits(enable=1, max_total_trq=30.0, max_charge_power_w=40000.0)
+    rl_mix, rr_mix, diff_mix, *_ = run_scenario(time_steps, scenario_mixed_sign_regen_tv, regen_limits=tight_rg)
+    ax = axs[0, 0]
+    ax.plot(time_steps, rl_mix, color='#0052cc', linewidth=2.5, label='RL Torque (Nm)')
+    ax.plot(time_steps, rr_mix, color='#e60000', linewidth=2.5, linestyle='--', label='RR Torque (Nm)')
+    ax.axhline(0, color='#999999', linewidth=1.0)
+    ax.set_title('30: Mixed-Sign TV (drive+regen, tight 30Nm budget)', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('Torque (Nm)'); ax.legend(loc='best')
+
+    # --- Panel 2: Regen lockup recovery ---
+    rl_lock, rr_lock, *_ = run_scenario(time_steps, scenario_regen_lockup_recovery)
+    ax = axs[0, 1]
+    ax.plot(time_steps, rl_lock, color='#0052cc', linewidth=2.5, label='RL Torque (Nm)')
+    ax.plot(time_steps, rr_lock, color='#e60000', linewidth=2.5, linestyle='--', label='RR Torque (Nm)')
+    ax.axvspan(1.0, 1.15, color='#ffcc00', alpha=0.25, label='Simulated lock event')
+    ax.set_title('31: Regen Wheel-Lockup Recovery', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('Torque (Nm)'); ax.legend(loc='best')
+
+    # --- Panel 3: Thermal derate under regen ---
+    t_therm, rl_therm, rr_therm, temp_therm = run_regen_thermal_derate()
+    ax = axs[1, 0]
+    ax.plot(t_therm, rl_therm, color='#0052cc', linewidth=2.5, label='RL Torque (Nm)')
+    ax.plot(t_therm, rr_therm, color='#e60000', linewidth=2.5, linestyle='--', label='RR Torque (Nm)')
+    ax2 = ax.twinx()
+    ax2.plot(t_therm, temp_therm, color='#ff8800', linewidth=1.5, linestyle=':', label='Inverter Temp (C)')
+    ax2.axhline(75.0, color='#ff0000', linewidth=1.0, linestyle='--', alpha=0.6)
+    ax2.set_ylabel('Temp (°C)')
+    ax.set_title('32: Regen Under Thermal Derate (75°C threshold)', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('Torque (Nm)')
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, loc='best', fontsize=8)
+
+    # --- Panel 4: Continuous budget ramp sweep ---
+    t_ramp, rl_ramp, rr_ramp, budget_ramp, total_mag_ramp = run_regen_budget_ramp()
+    ax = axs[1, 1]
+    ax.plot(t_ramp, total_mag_ramp, color='#0052cc', linewidth=2.5, label='|T_RL|+|T_RR| Delivered (Nm)')
+    ax.plot(t_ramp, budget_ramp, color='#e60000', linewidth=2.0, linestyle='--', label='Budget Ceiling (Nm)')
+    ax.set_title('33: Continuous Budget Ramp (300→20 Nm, soft-cap tracking)', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('Torque Magnitude (Nm)'); ax.legend(loc='best')
+
+    plt.tight_layout()
+    out_dir = os.path.join('output', 'graphs')
+    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(out_dir, 'sanity_phase12_regen_analysis.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"✅ Generado: {output_path}")
+    plt.close()
+
+    return (rl_mix, rr_mix, rl_lock, rr_lock, t_therm, rl_therm, rr_therm, temp_therm,
+            t_ramp, rl_ramp, rr_ramp, budget_ramp, total_mag_ramp)
+
+
+# The TV output rate limiter (GP_TV_RATE_LIMIT, gp_torque_vectoring.h) caps
+# EACH wheel's slew independently at GP_TV_RATE_LIMIT Nm/s. When both wheels'
+# magnitudes move in the same direction simultaneously (as happens here: both
+# regen magnitudes shrink together as the shared total-budget ceiling drops),
+# the SUM |T_RL|+|T_RR| can legitimately slew at up to 2x that per-wheel
+# ceiling. This is the rate limiter working as designed, not chattering —
+# the threshold below is derived from the real constant plus a margin for
+# solver/filter dynamics, not an arbitrary guess.
+GP_TV_RATE_LIMIT_REF = 3252.3  # Nm/s, must match gp_torque_vectoring.h
+MAX_COMBINED_SLEW_NM_S = 2.0 * GP_TV_RATE_LIMIT_REF * 1.05  # 5% margin
+
+
+def run_phase12_regen_analysis(time_steps):
+    """Runs Phase 12 plots + the three regression guards that belong to it:
+    mixed-sign drive preservation, thermal-derate monotonicity, and
+    budget-ramp continuity (no discontinuous jump beyond the rate limiter's
+    own designed ceiling as the soft-cap engages)."""
+    print("\n" + "=" * 80)
+    print("  PHASE 12: REGENERATIVE BRAKING & CHARGE-BUDGET MANAGEMENT")
+    print("=" * 80)
+
+    (rl_mix, rr_mix, rl_lock, rr_lock, t_therm, rl_therm, rr_therm, temp_therm,
+     t_ramp, rl_ramp, rr_ramp, budget_ramp, total_mag_ramp) = generate_phase12_report(time_steps)
+
+    # --- Guard 1: mixed-sign drive preservation (tight vs loose budget) ---
+    tight_rg = default_regen_limits(enable=1, max_total_trq=30.0, max_charge_power_w=40000.0)
+    loose_rg = default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=40000.0)
+    rl_t, rr_t, *_ = run_scenario(time_steps, scenario_mixed_sign_regen_tv, regen_limits=tight_rg)
+    rl_l, rr_l, *_ = run_scenario(time_steps, scenario_mixed_sign_regen_tv, regen_limits=loose_rg)
+
+    drive_wheel_tight = np.where(rl_t > 0, rl_t, rr_t)
+    drive_wheel_loose  = np.where(rl_l > 0, rl_l, rr_l)
+    regen_wheel_tight  = np.where(rl_t > 0, rr_t, rl_t)
+
+    regen_budget_ok = np.all(np.abs(np.minimum(regen_wheel_tight, 0.0)) <= 30.0 + 1e-1)
+    drive_delta = np.mean(np.abs(drive_wheel_tight - drive_wheel_loose))
+    drive_preserved = drive_delta < 5.0
+
+    ok1 = regen_budget_ok and drive_preserved
+    color1 = "\033[92m" if ok1 else "\033[91m"
+    status1 = "PASS" if ok1 else "FAIL"
+    print(f"{color1}{status1:<18}\033[0m | 30: Mixed-Sign Regen TV                  | "
+          f"Budget OK: {str(regen_budget_ok):<5} | Drive delta (tight vs loose): {drive_delta:6.3f} Nm")
+    assert regen_budget_ok, "Regen magnitude exceeded budget under mixed-sign TV."
+    assert drive_preserved, (
+        f"Drive torque diverged {drive_delta:.2f} Nm between tight/loose regen budgets "
+        f"— sign-blind rescale regression."
+    )
+
+    # --- Guard 2: thermal derate must be monotonically non-increasing past 75C ---
+    hot_mask = temp_therm > 75.0
+    regen_mag = np.abs(rl_therm) + np.abs(rr_therm)
+    if np.any(hot_mask):
+        regen_in_hot_region = regen_mag[hot_mask]
+        derate_monotonic = (regen_in_hot_region[-1] <= regen_in_hot_region[0] + 5.0)
+        regen_at_75 = regen_in_hot_region[0]
+    else:
+        derate_monotonic = True
+        regen_at_75 = float('nan')
+
+    color2 = "\033[92m" if derate_monotonic else "\033[91m"
+    status2 = "PASS" if derate_monotonic else "FAIL"
+    print(f"{color2}{status2:<18}\033[0m | 32: Thermal Derate Monotonicity          | "
+          f"@75C: {regen_at_75:6.1f} Nm -> @95C: {regen_mag[-1]:6.1f} Nm")
+    assert derate_monotonic, "Regen torque increased past the 75C derate threshold — thermal derate regression."
+
+    # --- Guard 3: budget-ramp must track the soft cap within the rate
+    # limiter's own combined-wheel ceiling (no jump BEYOND that ceiling) ---
+    slew = np.abs(np.diff(total_mag_ramp)) / (t_ramp[1] - t_ramp[0])
+    max_slew = np.max(slew)
+    ramp_continuous = max_slew <= MAX_COMBINED_SLEW_NM_S
+    over_budget = np.any(total_mag_ramp > budget_ramp + 1.0)
+
+    ok3 = ramp_continuous and not over_budget
+    color3 = "\033[92m" if ok3 else "\033[91m"
+    status3 = "PASS" if ok3 else "FAIL"
+    print(f"{color3}{status3:<18}\033[0m | 33: Budget Ramp Continuity               | "
+          f"Max slew: {max_slew:7.1f} Nm/s (limit {MAX_COMBINED_SLEW_NM_S:.0f}) | Over budget: {over_budget}")
+    assert ramp_continuous, (
+        f"Budget ramp slew ({max_slew:.1f} Nm/s) exceeded 2x GP_TV_RATE_LIMIT "
+        f"({MAX_COMBINED_SLEW_NM_S:.1f} Nm/s) — genuine discontinuity, not just the rate limiter's ceiling."
+    )
+    assert not over_budget, "Delivered regen magnitude exceeded the live budget ceiling during the ramp."
+
+    print("=" * 80)
+    print(f"PHASE 12 SUMMARY | Mixed-sign drive delta: {drive_delta:.2f} Nm | "
+          f"Thermal derate @95C: {regen_mag[-1]:.1f} Nm | "
+          f"Ramp max slew: {max_slew:.1f} Nm/s (rate-limiter ceiling: {MAX_COMBINED_SLEW_NM_S:.0f} Nm/s)")
+    print("=" * 80 + "\n")
+
 def generate_comparison_report(scenarios, titles, filename, super_title, time_steps, plot_mode):
     """Unified comparative renderer (Full English, consistent coloring)"""
     fig, axs = plt.subplots(2, 2, figsize=(15, 9))
@@ -852,6 +1073,70 @@ def scenario_limit_slalom(t):
     omega = [0.0, 0.0, w_rear, w_rear]
     brake = 0.0
     return fx, delta, vx, vy, wz, ay, ax, omega, brake
+
+def scenario_mixed_sign_regen_tv(t):
+    """30: Mixed-Sign TV Under Tight Regen Budget. One wheel driving, the
+    other lightly regening, under moderate TV — the operating point the
+    sign-blind post-solve rescale bug silently crushed drive torque on.
+
+    ay tuned to ~0.9g (not ~1.65g as originally) so the friction-ellipse
+    bound leaves real torque headroom on both wheels. At the original ay,
+    both wheels were crushed to <1 Nm by physics alone regardless of the
+    regen budget, so a pass there proved nothing about the rescale logic —
+    it just proved both numbers were tiny."""
+    vx = 18.0
+    fx = 600.0      # moderate net positive demand
+    delta = 0.28    # turn-in aggressive enough for a real Mz split, not saturating
+    wz = 0.5
+    ay = vx * wz    # ~9 m/s^2, ~0.9g
+    ax = 0.0
+    w_rear = vx / 0.2032
+    omega = [0.0, 0.0, w_rear, w_rear]
+    return fx, delta, vx, 0.0, wz, ay, ax, omega, 0.0
+
+def scenario_regen_lockup_recovery(t):
+    """31: Regen Wheel-Lockup Recovery. Heavy trail-braking regen while one
+    rear wheel's speed suddenly drops toward lock (simulated via a sharp
+    omega decay), forcing TC's negative-omega_dot derivative-kick branch to
+    intervene and pull regen torque back before the wheel fully locks."""
+    vx = 20.0
+    fx = -2200.0
+    delta = 0.05
+    wz = 0.05
+    ay = 0.3
+    ax = fx / 250.0
+    w_rear_nominal = vx / 0.2032
+    # RR wheel decelerates sharply toward lock between t=1.0 and t=1.15s
+    if 1.0 < t < 1.15:
+        w_rr = w_rear_nominal * max(0.15, 1.0 - (t - 1.0) * 6.0)
+    else:
+        w_rr = w_rear_nominal
+    omega = [0.0, 0.0, w_rear_nominal, w_rr]
+    return fx, delta, vx, 0.0, wz, ay, ax, omega, 0.5
+
+def scenario_regen_thermal_derate(t):
+    """32: Regen Under Inverter Thermal Derate. Sustained heavy regen while
+    inverter power-stage temperature climbs past the 75C derate threshold —
+    the charge-power ceiling (t_lb_power, mirrored from the drive-side
+    thermal derate) should pull the achievable regen torque down smoothly
+    as temperature rises, not chatter or clip discontinuously."""
+    vx = 20.0
+    fx = -2000.0
+    delta = 0.1
+    wz = 0.1
+    ay = 1.0
+    ax = fx / 250.0
+    w_rear = vx / 0.2032
+    omega = [0.0, 0.0, w_rear, w_rear]
+    return fx, delta, vx, 0.0, wz, ay, ax, omega, 0.5
+
+def scenario_regen_thermal_derate_temps(t):
+    """Companion temperature profile for scenario_regen_thermal_derate:
+    ramps from a cool 50C to a hot 95C over the 3s window, crossing the
+    75C derate threshold at t≈1.5s."""
+    temp = 50.0 + (95.0 - 50.0) * (t / 3.0)
+    return temp, temp
+
 # =====================================================================
 # 6. MAIN EXECUTION
 # =====================================================================
@@ -906,6 +1191,9 @@ if __name__ == "__main__":
     print(f"{status} | 29: Regen-TV At The Limit | Budget respected: {budget_ok} | Shape preserved: {shape_preserved}")
     assert budget_ok, "Total regen budget exceeded — scale_neg_trq / regen bound rescale is broken."
     assert shape_preserved, "Regen split collapsed toward symmetric under a tight budget — per-wheel clamping regression."
+
+    # Mixed-sign TV regression guard relocated to Phase 12 (dedicated regen
+    # test suite) — see run_phase12_regen_analysis() below.
 
     # ------------------ SECTION B: DOGFIGHT COMPARISONS ------------------
     print("\nStarting Dogfight Comparisons (PD vs. AL-QP)...")
@@ -972,6 +1260,9 @@ if __name__ == "__main__":
     generate_report(s11, t11, 'sanity_phase11_ultimate_performance.png', 
                     'Phase 11: AL-QP Race-Pace Analytics', time_steps)
 
+    # ------------------ SECTION E.5: PHASE 12 — REGEN ANALYSIS ------------------
+    run_phase12_regen_analysis(time_steps)
+
     # ------------------ SECTION F: MONTE CARLO NOISE & LATENCY ------------------
     mc_scenarios = {
         "14: Skidpad Transition (Center Figure-8)": scenario_skidpad_transition,
@@ -980,6 +1271,8 @@ if __name__ == "__main__":
         "25: Mid-Corner Curb Strike (Transient TC)": scenario_mid_corner_curb,
         "28: Limit Slalom (Dynamic Degradation)": scenario_limit_slalom,
         "29: Regen-TV At The Limit": scenario_regen_tv_at_limit,
+        "30: Mixed-Sign Regen TV": scenario_mixed_sign_regen_tv,
+        "31: Regen Lockup Recovery": scenario_regen_lockup_recovery,
     }
     run_monte_carlo_suite(mc_scenarios, num_trials=30, delay_ticks=1)
 

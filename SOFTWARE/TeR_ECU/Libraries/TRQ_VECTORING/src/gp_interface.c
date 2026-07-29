@@ -193,8 +193,15 @@ void gp_pack_telemetry(
     uint16_t qp_pack = (uint16_t)(qp_residual * 1000.0f);
     can_diag[0] = (qp_pack >> 8) & 0xFF; can_diag[1] = qp_pack & 0xFF;
 
-    int16_t alpha_pack = (int16_t)(state->alpha_qp * 1000000.0f);
-    can_diag[2] = (alpha_pack >> 8) & 0xFF; can_diag[3] = alpha_pack & 0xFF;
+    // mz_sat_ratio, not alpha_qp: alpha_qp is a compile-time-derived constant
+    // in the production (closed-form) solve path and never changes at
+    // runtime — transmitting it as "Learning Step (Alpha)" implied a live
+    // adaptive quantity that doesn't exist here. mz_sat_ratio is the actual
+    // live anti-windup back-calculation signal (achieved-Δτ / requested-Δτ,
+    // clamped [0,1]) — the number that tells a race engineer whether the
+    // tires ran out of allocation room this lap.
+    uint16_t mz_sat_pack = (uint16_t)(GP_CLAMP(state->mz_sat_ratio, 0.0f, 1.0f) * 10000.0f);
+    can_diag[2] = (mz_sat_pack >> 8) & 0xFF; can_diag[3] = mz_sat_pack & 0xFF;
 
     can_diag[4] = 0; can_diag[5] = 0;
     can_diag[6] = 0; can_diag[7] = 0;

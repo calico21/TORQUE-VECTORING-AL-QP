@@ -109,8 +109,8 @@ void gp_tc_step(
         
         float kappa_raw = gp_tc_compute_kappa(omega[i], vx);
         
-        float alpha_lp = 0.90f; 
-        state->kappa_filt[i] = alpha_lp * state->kappa_filt[i] + (1.0f - alpha_lp) * kappa_raw;
+        state->kappa_filt[i] = GP_TC_ALPHA_KAPPA_LP * state->kappa_filt[i] +
+                                (1.0f - GP_TC_ALPHA_KAPPA_LP) * kappa_raw;
         
         float prev_k = state->kappa_prev[i];
         

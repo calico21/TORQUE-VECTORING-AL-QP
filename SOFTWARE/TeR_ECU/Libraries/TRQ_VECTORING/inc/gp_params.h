@@ -27,6 +27,16 @@
 #define GP_TC_KP      26.989f  // Traction control proportional gain
 #define GP_TC_KI      12.0f    // Traction control integral gain
 
+// ── Regen active-set transition softness ───────────────────────────
+// Shared by both the pre-solve t_lb[] derivation and the post-solve budget
+// rescale in gp_torque_vectoring.c. Previously two independently-declared
+// 4.0f locals with different names (GP_REGEN_BOUND_SOFTNESS /
+// GP_REGEN_BUDGET_SOFTNESS) — same hazard gp_params.h exists to eliminate,
+// one scope down. Widening this trades chatter-smoothness for how tightly
+// the regen bound is respected near the boundary; narrowing it recovers a
+// harder edge at the cost of reintroducing noise-sensitivity.
+#define GP_REGEN_SOFTNESS   4.0f   // [Nm] transition width, both regen soft-caps
+
 // ── Regen / Torque-Vectoring-under-braking ──────────────────────────
 // Nominal accumulator pack voltage used ONLY to convert the configurable
 // regen current ceiling (TeR.config.regen_max_current, in Amps) into an
@@ -35,4 +45,5 @@
 // accessor is confirmed in ams.dbc. A fixed nominal is a safe, conservative
 // placeholder as long as it's not set above the pack's real minimum voltage.
 #define GP_NOMINAL_PACK_VOLTAGE_V   400.0f
+
 #endif // GP_PARAMS_H
