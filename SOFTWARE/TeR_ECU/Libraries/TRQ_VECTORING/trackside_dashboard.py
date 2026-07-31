@@ -98,8 +98,8 @@ CHANNELS: List[ChannelSpec] = [
                 y_range=(-150, 150)),
     ChannelSpec("qp_residual", "Residuo KKT Solver", GROUP_ORDER[0], "-", "#33FF33", 
                 y_range=(0, 5), decimals=4, warn=lambda v: v > 0.05, crit=lambda v: v > 0.2),
-    ChannelSpec("alpha_qp", "Learning Step (Alpha)", GROUP_ORDER[0], "-", "#AAFF33", 
-                y_range=(0, 1), decimals=6),
+    ChannelSpec("mz_sat_ratio", "Mz Saturation Ratio", GROUP_ORDER[0], "-", "#AAFF33", 
+                y_range=(0, 1.05), decimals=3, warn=lambda v: v < 0.7, crit=lambda v: v < 0.4),
 
     # ---- Traction Control / RLS Pacejka --------------------------------
     ChannelSpec("kappa_opt_rl", "Target Slip RL", GROUP_ORDER[1], "%", "#FFEA00", y_range=(0, 25)),
@@ -492,7 +492,7 @@ class CanWorker(threading.Thread):
             return
         if mid == 0x103 and len(d) >= 8:
             self.hub.push("qp_residual", now, u16(d, 0) / 1000.0)
-            self.hub.push("alpha_qp", now, i16(d, 2) / 1000000.0)
+            self.hub.push("mz_sat_ratio", now, u16(d, 2) / 10000.0)
             return
 
         # --- Resto de señales vía DBC / cantools -------------------------------
