@@ -25,6 +25,9 @@ float gp_sigmoid(float x);
 // Interpolación bilineal 2D (4x4) para mapas de ganancias (Kp, Kd, Ki)
 float gp_bilinear_interp_4x4(const float table[16], float x_norm, float y_norm);
 
+// Función de saturación suave suave y diferenciable (magnitud-only, val >= 0)
+float gp_soft_cap(float val, float limit, float alpha);
+
 // Aproximación rápida para el límite del Friction Ellipse
 float gp_softplus_sqrt(float x);
 

@@ -46,9 +46,9 @@
 #define GP_NOMINAL_PACK_VOLTAGE_V   400.0f
 
 // ── Branch 4: NMPC Tuning Constants ──────────────────────────────────
-#define GP_NMPC_Q_YAW       2000.0f     // Yaw rate error penalty (retuned, was 100000 in-file)
-#define GP_NMPC_R_EFFORT       2.0f     // Control effort penalty (retuned, was 0.01 in-file)
-#define GP_NMPC_R_SLEW          4.0f    // Rate-of-change penalty (new: single source)
+#define GP_NMPC_Q_YAW       2000.0f     // Yaw rate error penalty
+#define GP_NMPC_R_EFFORT       2.0f     // Control effort penalty
+#define GP_NMPC_R_SLEW        10.0f     // Retuned rate-of-change penalty (was 4.0f)
 #define GP_NMPC_MZ_MAX      200.0f      // Maximum yaw moment request [Nm]
-#define GP_NMPC_SOFTNESS      20.0f     // [Nm] soft-cap transition width, mirrors GP_REGEN_SOFTNESS pattern
+#define GP_NMPC_SOFTNESS      10.0f     // [Nm] soft-cap transition width
 #endif // GP_PARAMS_H

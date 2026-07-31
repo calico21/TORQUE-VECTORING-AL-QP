@@ -7,11 +7,6 @@
 #include "gp_math.h"
 #include "gp_nmpc.h"
 
-// Función auxiliar de saturación suave para el presupuesto de regeneración
-static inline float gp_soft_cap(float val, float limit, float alpha) {
-    if (val <= 0.0f) return 0.0f;
-    return limit * tanhf(val * alpha / limit);
-}
 
 // ── Embedded ARM Hardware Profiling (Compiles ONLY for STM32 Target) ─
 #if defined(__arm__) || defined(__ARM_ARCH)
@@ -74,6 +69,7 @@ void gp_tv_init(tv_state_t* state) {
     state->t_ub_rr_filt = 0.0f;
     state->t_lb_rl_filt = 0.0f;
     state->t_lb_rr_filt = 0.0f;
+    state->delta_nmpc_filt = 0.0f; // <-- ADD THIS LINE
 
     float h = GP_W_REG + GP_W_SMOOTH;
     float a_sq = 2.0f / (GP_R_WHEEL * GP_R_WHEEL);
@@ -215,21 +211,17 @@ void gp_tv_step(
 
     #if defined(GP_TV_USE_NMPC) && (GP_TV_USE_NMPC == 1)
         // ── Branch 4: Embedded NMPC Predictive Yaw Controller ────────────
+        // ~15ms tau LPF to attenuate 25Hz encoder noise before horizon expansion
+        float alpha_delta = GP_CLAMP(dt / (0.015f + dt), 0.0f, 1.0f);
+        state->delta_nmpc_filt += alpha_delta * (delta - state->delta_nmpc_filt);
+
         float states_nmpc[3] = { vx, vy, wz_corr };
-        gp_nmpc_step(states_nmpc, delta, wz_ref, dt, mz_max_dyn, mz_rate_max,
-                     &state->nmpc, &mz_req);
+        gp_nmpc_step(states_nmpc, state->delta_nmpc_filt, wz_ref, dt, mz_max_dyn, mz_rate_max,
+                    &state->nmpc, &mz_req);
 
-        // Same physical gates Branch 3 applies below. Without these, NMPC
-        // has no notion of "driver already countersteering" or "already at
-        // target yaw rate, back off" and keeps chasing wz_ref at full box
-        // authority through a reversal — this was the chattering root cause.
         mz_req = GP_CLAMP(mz_req * os_gate * counter_steer_factor,
-                           -mz_max_dyn, mz_max_dyn);
+                        -mz_max_dyn, mz_max_dyn);
 
-        // Persist the ACTUALLY REQUESTED (post box+slew+gate) Mz as next
-        // tick's warm-start/slew reference. Omitting this line is why
-        // u_warm was silently dead — the solve was rate-limiting itself
-        // against zero every tick regardless of what it commanded last.
         state->nmpc.u_warm = mz_req;
     #else
         // ── Branch 3: Feedback PID + Beta Stabilization ─────────────────

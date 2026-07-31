@@ -105,14 +105,16 @@ void gp_nmpc_step(const float states[3],
     float u_unc = -g / (H + 1e-8f);
     if (isnan(u_unc) || isinf(u_unc)) u_unc = 0.0f;
 
-    // 4. Box + slew constraints THE OPTIMIZER IS AWARE OF this time: slew
-    // is measured against u_warm, which the caller updates with the
-    // ACTUALLY APPLIED torque post box-constraint/rate-limit — not the
-    // stale unconstrained value the old code fed back to itself.
-    float lo = GP_MAX(-mz_max, nmpc_state->u_warm - mz_rate_max);
-    float hi = GP_MIN( mz_max, nmpc_state->u_warm + mz_rate_max);
-    if (hi < lo) { float t = hi; hi = lo; lo = t; }
+    // 4. Smooth soft-cap constraints for slew rate and magnitude
+    float center = nmpc_state->u_warm;
+    float delta_u = u_unc - center;
+    
+    // Stage 1: Soft-cap slew rate delta relative to mz_rate_max
+    float delta_mag = gp_soft_cap(fabsf(delta_u), mz_rate_max, 1.0f / GP_NMPC_SOFTNESS);
+    float u_slewed = center + copysignf(delta_mag, delta_u);
 
-    *mz_cmd = GP_CLAMP(u_unc, lo, hi);
+    // Stage 2: Soft-cap total moment magnitude relative to mz_max
+    float mag = gp_soft_cap(fabsf(u_slewed), mz_max, 1.0f / GP_NMPC_SOFTNESS);
+    *mz_cmd = copysignf(mag, u_slewed);
     // u_warm is intentionally NOT updated here — see caller.
 }

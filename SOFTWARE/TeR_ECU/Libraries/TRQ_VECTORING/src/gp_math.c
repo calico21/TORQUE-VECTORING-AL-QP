@@ -54,3 +54,9 @@ float gp_bilinear_interp_4x4(const float table[16], float x_norm, float y_norm) 
            c01 * (1.0f - fx) * fy +
            c11 * fx          * fy;
 }
+
+// Saturación suave magnitud-only
+float gp_soft_cap(float val, float limit, float alpha) {
+    if (val <= 0.0f) return 0.0f;
+    return limit * tanhf(val * alpha / limit);
+}

@@ -90,6 +90,7 @@ class TVState(ctypes.Structure):
         ("t_ub_rr_filt",   ctypes.c_float),
         ("t_lb_rl_filt",   ctypes.c_float),
         ("t_lb_rr_filt",   ctypes.c_float),
+        ("delta_nmpc_filt",ctypes.c_float),
     ]
 
 # Structural Safety Assertions

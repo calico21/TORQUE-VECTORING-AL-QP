@@ -66,6 +66,7 @@ typedef struct {
     float t_ub_rr_filt;
     float t_lb_rl_filt;   // NEW: filtered per-wheel regen (negative-torque) bound
     float t_lb_rr_filt;   // NEW
+    float delta_nmpc_filt; // NMPC steering LPF state (~15ms tau)
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);
