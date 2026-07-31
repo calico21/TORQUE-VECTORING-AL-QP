@@ -1,131 +1,67 @@
+/*
+ * tv_mds.c — Integration shim for v1-simple-effective. All TeR.* / regen_allowed()
+ * coupling lives HERE; v1_vehicle_dynamics.c has none, by design (see its header).
+ * Previously this file re-implemented the entire control law a second time —
+ * two sources of truth for one algorithm. It now does nothing but marshal data.
+ */
 #include "tv_mds.h"
-#include "v1_lut_data.h"
-#include "TeR_UTILS.h"
-#include <math.h>
-
-#define GRAVITY_MS2 9.81f
-#define V_FLOOR_MS  0.5f
+#include "TeR_TRQMANAGER.h"   /* regen_allowed() */
 
 static v1_params_t v1_params;
-static v1_state_t  v1_state = { 
-    .error_integral_nm = 0.0f, 
-    .cut_active_rl     = false, 
-    .cut_active_rr     = false, 
-    .initialized       = false 
-};
-
-static void v1_init_params(void) {
-    v1_params.kp_yaw             = 85.0f;   /* Nm / (rad/s) */
-    v1_params.ki_yaw             = 12.0f;   /* Nm / rad */
-    v1_params.k_ff               = 32.0f;   /* Nm / rad */
-    v1_params.max_yaw_moment_nm  = 260.0f;  /* Max DYC moment [Nm] */
-    v1_params.pi_windup_limit_nm = 70.0f;   /* Integrator clamp [Nm] */
-    v1_params.peak_mu            = 1.35f;   /* Nominal dry grip */
-
-    v1_params.max_allowable_slip = 0.12f;   /* 12% slip ratio target */
-    v1_params.slip_cut_gain      = 12.0f;   /* Smooth attenuation factor */
-}
+static v1_state_t  v1_state;
+static uint8_t     v1_ready = 0;
 
 void tv_reset_state(void) {
-    v1_state.error_integral_nm = 0.0f;
-    v1_state.cut_active_rl     = false;
-    v1_state.cut_active_rr     = false;
-    v1_state.initialized       = true;
+    v1_reset_state(&v1_state);
 }
 
-/* Entry point called by TeR_TRQMANAGER.c */
+static float v1_ground_speed_ms(void) {
+    /* Prefer the non-driven front axle — same source gp_interface.c uses.
+     * Falling back to the driven-rear-average means TC's slip denominator is
+     * measured off the wheels it's protecting: during real wheelspin, vx is
+     * overestimated exactly when accuracy matters most. */
+    float front_kmh = ter_front_v_front_v_decode(TeR.speed.front_v);
+    if (front_kmh > 0.1f) return front_kmh / 3.6f;
+    return TeR.wheelInfo.speed / 3.6f;
+}
+
 trqMap_t trqVectoring(trq_t limit) {
-    if (!v1_state.initialized) {
-        v1_init_params();
+    if (!v1_ready) {
+        v1_init_params(&v1_params);
         tv_reset_state();
+        v1_ready = 1;
     }
 
-    trqMap_t outMap = { .rLeft = 0, .rRight = 0 };
-
-    /* 1. Base Torque Demand (APPS LUT / Regen Blending) */
-    trq_t base_trq = 0;
-    float rear_rpm = 0.5f * ((float)TeR.wheelInfo.rl_rpm + (float)TeR.wheelInfo.rr_rpm);
-    float pedal_pct = (float)TeR.apps.apps_av / 255.0f;
-
-    if (ter_bpps_bpps_decode(TeR.bpps.bpps) > 5.0f) {
-        float brake_pct = ter_bpps_bpps_decode(TeR.bpps.bpps) / 100.0f;
-        base_trq = (trq_t)(-brake_pct * TeR.config.regen_max_trq * 0.5f);
-    } else {
-        float lut_trq = v1_interp2d_drive_torque(pedal_pct, rear_rpm);
-        base_trq = (trq_t)clampf(lut_trq, 0.0f, (float)limit * 0.5f);
-    }
-
-    /* 2. Signals & Unit Conversions */
+    float apps_pct  = (float)TeR.apps.apps_av / 255.0f;
+    float brake_bar = ter_bpps_bpps_decode(TeR.bpps.bpps);
     float steer_rad = ter_steer_angle_decode(TeR.steer.angle) * ((float)PI / 180.0f);
-    float wz_measured = ter_ang_rate_yaw_rate_z_decode(TeR.angRate.yaw_rate_z) * ((float)PI / 180.0f);
-    float vx = (TeR.wheelInfo.speed < V_FLOOR_MS) ? V_FLOOR_MS : TeR.wheelInfo.speed;
+    float wz        = ter_ang_rate_yaw_rate_z_decode(TeR.angRate.yaw_rate_z) * ((float)PI / 180.0f);
+    float vx        = v1_ground_speed_ms();
 
-    /* 3. Adhesion-Saturated Bicycle Reference Model */
-    float denom = V1_VEHICLE_WB + V1_K_UNDERSTEER * (vx * vx);
-    float r_ref = (denom > 0.001f) ? ((vx / denom) * steer_rad) : 0.0f;
+    v1_trq_map_t out = v1_tv_step(
+        apps_pct, brake_bar, steer_rad, wz, vx,
+        (float)TeR.wheelInfo.rl_rpm, (float)TeR.wheelInfo.rr_rpm,
+        (float)limit, regen_allowed(), (float)TeR.config.regen_max_trq,
+        0.005f, /* matches TeR_TRQMANAGER.c task_period */
+        &v1_params, &v1_state
+    );
 
-    /* r_max = (mu * g) / v_x */
-    float r_max = (v1_params.peak_mu * GRAVITY_MS2) / vx;
-    r_ref = clampf(r_ref, -r_max, r_max);
-
-    /* 4. Feedforward + PI Controller with Conditional Integration */
-    float yaw_error = r_ref - wz_measured;
-    float m_ff = steer_rad * v1_params.k_ff;
-    float m_p  = yaw_error * v1_params.kp_yaw;
-
-    float total_unsat = m_ff + m_p + v1_state.error_integral_nm;
-    bool is_saturated = (fabsf(total_unsat) >= v1_params.max_yaw_moment_nm);
-    bool same_sign    = ((total_unsat * yaw_error) > 0.0f);
-
-    if (!is_saturated || !same_sign) {
-        v1_state.error_integral_nm += v1_params.ki_yaw * yaw_error * 0.005f; /* 200 Hz / 5ms dt */
-        v1_state.error_integral_nm = clampf(v1_state.error_integral_nm, 
-                                            -v1_params.pi_windup_limit_nm, 
-                                             v1_params.pi_windup_limit_nm);
-    }
-
-    float m_z = clampf(m_ff + m_p + v1_state.error_integral_nm, 
-                       -v1_params.max_yaw_moment_nm, 
-                        v1_params.max_yaw_moment_nm);
-
-    /* 5. Rear Axle Moment Allocation: delta_T = (M_z * WHEEL_RADIUS) / w */
-    float delta_trq = (m_z * (float)WHEEL_RADIUS) / V1_VEHICLE_TW;
-
-    outMap.rLeft  = (trq_t)(base_trq - delta_trq);
-    outMap.rRight = (trq_t)(base_trq + delta_trq);
-
-    return outMap;
+    trqMap_t trqMap;
+    trqMap.rLeft  = (trq_t)out.rl_nm;
+    trqMap.rRight = (trq_t)out.rr_nm;
+    return trqMap;
 }
 
-/* Replacement for tractionControlOFF in TRQMANAGER pipeline */
 trqMap_t tractionControl(trqMap_t in) {
-    float vx = (TeR.wheelInfo.speed < V_FLOOR_MS) ? V_FLOOR_MS : TeR.wheelInfo.speed;
+    float vx = v1_ground_speed_ms();
+    v1_trq_map_t v1in  = { .rl_nm = (float)in.rLeft, .rr_nm = (float)in.rRight };
+    v1_trq_map_t v1out = v1_traction_control_step(
+        v1in, (float)TeR.wheelInfo.rl_rpm, (float)TeR.wheelInfo.rr_rpm,
+        vx, &v1_params, &v1_state
+    );
 
-    float v_rl = (TeR.wheelInfo.rl_rpm * (2.0f * (float)PI / 60.0f)) * (float)WHEEL_RADIUS;
-    float v_rr = (TeR.wheelInfo.rr_rpm * (2.0f * (float)PI / 60.0f)) * (float)WHEEL_RADIUS;
-
-    float slip_rl = (v_rl - vx) / vx;
-    float slip_rr = (v_rr - vx) / vx;
-
-    /* Hysteresis Tracking */
-    if (slip_rl > v1_params.max_allowable_slip) v1_state.cut_active_rl = true;
-    else if (slip_rl < (v1_params.max_allowable_slip - 0.03f)) v1_state.cut_active_rl = false;
-
-    if (slip_rr > v1_params.max_allowable_slip) v1_state.cut_active_rr = true;
-    else if (slip_rr < (v1_params.max_allowable_slip - 0.03f)) v1_state.cut_active_rr = false;
-
-    /* Smooth Continuous Attenuation */
-    if (slip_rl > v1_params.max_allowable_slip && in.rLeft > 0) {
-        float excess_slip = slip_rl - v1_params.max_allowable_slip;
-        float factor_rl = 1.0f / (1.0f + v1_params.slip_cut_gain * excess_slip);
-        in.rLeft = (trq_t)(in.rLeft * factor_rl);
-    }
-
-    if (slip_rr > v1_params.max_allowable_slip && in.rRight > 0) {
-        float excess_slip = slip_rr - v1_params.max_allowable_slip;
-        float factor_rr = 1.0f / (1.0f + v1_params.slip_cut_gain * excess_slip);
-        in.rRight = (trq_t)(in.rRight * factor_rr);
-    }
-
-    return in;
+    trqMap_t out;
+    out.rLeft  = (trq_t)v1out.rl_nm;
+    out.rRight = (trq_t)v1out.rr_nm;
+    return out;
 }
