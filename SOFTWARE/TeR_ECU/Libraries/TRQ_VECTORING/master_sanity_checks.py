@@ -8,6 +8,9 @@ import os
 # =====================================================================
 import ctypes
 
+gp_lib_alqp = ctypes.CDLL('./gp_core_alqp.so')
+gp_lib_nmpc = ctypes.CDLL('./gp_core_nmpc.so')
+
 class TCState(ctypes.Structure):
     _fields_ = [
         ("pi_integral",     ctypes.c_float * 4),
@@ -59,11 +62,12 @@ class GPRegenLimits(ctypes.Structure):
 
 class NMPCState(ctypes.Structure):
     _fields_ = [
-        ("x_pred", (ctypes.c_float * 2) * 6),       # 6 state points across N=5 horizon [vy, r]
-        ("A_d", ((ctypes.c_float * 2) * 2) * 5),    # 5 discretized A matrices
-        ("B_d", ((ctypes.c_float * 1) * 2) * 5),    # 5 discretized B matrices
-        ("u_warm", ctypes.c_float * 5),             # 5 warm-start u_seq values
+        ("x_pred", (ctypes.c_float * 2) * 6),
+        ("A_d", (ctypes.c_float * 2) * 2),
+        ("B_d", (ctypes.c_float * 1) * 2),
+        ("u_warm", ctypes.c_float),
     ]
+
 
 class TVState(ctypes.Structure):
     _fields_ = [
@@ -132,11 +136,14 @@ gp_lib.gp_tv_init.argtypes = [ctypes.POINTER(TVState)]
 gp_lib.gp_nmpc_init.argtypes = [ctypes.POINTER(NMPCState)]
 
 gp_lib.gp_nmpc_step.argtypes = [
-    ctypes.POINTER(ctypes.c_float),     # states[3] = [vx, vy, wz]
-    ctypes.c_float,                     # delta_sw
-    ctypes.c_float,                     # r_ref
-    ctypes.POINTER(NMPCState),          # nmpc_state
-    ctypes.POINTER(ctypes.c_float)      # mz_cmd
+    ctypes.POINTER(ctypes.c_float),  # states[3]
+    ctypes.c_float,                  # delta_sw
+    ctypes.c_float,                  # r_ref
+    ctypes.c_float,                  # dt_ctrl
+    ctypes.c_float,                  # mz_max
+    ctypes.c_float,                  # mz_rate_max
+    ctypes.POINTER(NMPCState),
+    ctypes.POINTER(ctypes.c_float),
 ]
 
 # =====================================================================
@@ -792,75 +799,29 @@ def run_phase12_regen_analysis(time_steps):
     print("=" * 80 + "\n")
 
 def run_nmpc_vs_alqp_comparison(time_array, input_generator):
-    """Runs a true head-to-head C comparison between Branch 3 (AL-QP) and Branch 4 (NMPC)."""
-    state_alqp = TVState()
-    gp_lib.gp_tv_init(ctypes.byref(state_alqp))
-    state_alqp.tc.mu_surface[0] = 1.5; state_alqp.tc.mu_surface[1] = 1.5
-
-    nmpc_inst = NMPCState()
-    gp_lib.gp_nmpc_init(ctypes.byref(nmpc_inst))
-
+    state_alqp = TVState(); gp_lib_alqp.gp_tv_init(ctypes.byref(state_alqp))
+    state_nmpc = TVState(); gp_lib_nmpc.gp_tv_init(ctypes.byref(state_nmpc))
+    for s in (state_alqp, state_nmpc):
+        s.tc.mu_surface[0] = 1.5; s.tc.mu_surface[1] = 1.5
     rg = default_regen_limits()
     dt = time_array[1] - time_array[0] if len(time_array) > 1 else 0.005
-
     log = {'alqp_diff': [], 'nmpc_diff': []}
-
-    r_wheel = 0.2032
-    track_w = 1.2000
-    
-    # Rate limiter tracking memory for Branch 4 NMPC
-    t_qp_prev_nmpc = [0.0, 0.0]  # [RL, RR]
-    max_delta_t = 3252.3 * dt     # Match GP_TV_RATE_LIMIT
-
     for t in time_array:
         fx, delta, vx, vy, wz, ay, ax, omega, brake = input_generator(t)
         omega_c = (ctypes.c_float * 4)(*omega)
 
-        # 1. Evaluate Branch 3 (AL-QP) via full C pipeline
         t_out_alqp = (ctypes.c_float * 4)()
-        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake, 
-                          60.0, 60.0, 0.0, 0, ctypes.byref(rg), dt, 
-                          ctypes.byref(state_alqp), t_out_alqp)
+        gp_lib_alqp.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake,
+                                60.0, 60.0, 0.0, 0, ctypes.byref(rg), dt,
+                                ctypes.byref(state_alqp), t_out_alqp)
 
-        # 2. Evaluate Branch 4 (NMPC)
-        mz_cmd = ctypes.c_float(0.0)
-        states_c = (ctypes.c_float * 3)(float(vx), float(vy), float(wz))
-
-        wb = 0.806 + 0.744
-        r_ref = float((delta * vx) / wb if vx > 1.0 else 0.0)
-
-        gp_lib.gp_nmpc_step(
-            states_c,
-            ctypes.c_float(float(delta)),
-            ctypes.c_float(r_ref),
-            ctypes.byref(nmpc_inst),
-            ctypes.byref(mz_cmd)
-        )
-
-        mz_val = float(mz_cmd.value)
-        if np.isnan(mz_val) or np.isinf(mz_val):
-            mz_val = 0.0
-
-        # Nominal RWD Torque Allocation
-        t_req_nm = float((fx * r_wheel) / 2.0)
-        delta_t = (mz_val * r_wheel) / track_w
-        
-        t_rl_raw = t_req_nm - delta_t
-        t_rr_raw = t_req_nm + delta_t
-
-        # Apply ECU output rate limiter to NMPC
-        d_rl = np.clip(t_rl_raw - t_qp_prev_nmpc[0], -max_delta_t, max_delta_t)
-        d_rr = np.clip(t_rr_raw - t_qp_prev_nmpc[1], -max_delta_t, max_delta_t)
-
-        t_rl_nmpc = t_qp_prev_nmpc[0] + d_rl
-        t_rr_nmpc = t_qp_prev_nmpc[1] + d_rr
-
-        t_qp_prev_nmpc[0] = t_rl_nmpc
-        t_qp_prev_nmpc[1] = t_rr_nmpc
+        t_out_nmpc = (ctypes.c_float * 4)()
+        gp_lib_nmpc.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, omega_c, brake,
+                                60.0, 60.0, 0.0, 0, ctypes.byref(rg), dt,
+                                ctypes.byref(state_nmpc), t_out_nmpc)
 
         log['alqp_diff'].append(t_out_alqp[3] - t_out_alqp[2])
-        log['nmpc_diff'].append(t_rr_nmpc - t_rl_nmpc)
-
+        log['nmpc_diff'].append(t_out_nmpc[3] - t_out_nmpc[2])
     return log
 
 def generate_nmpc_dogfight_report(scenarios, titles, filename, super_title, time_steps):

@@ -177,11 +177,8 @@ void gp_tv_step(
     // ─────────────────────────────────────────────────────────────────
     // 2. DYNAMIC BETA STABILIZATION (CLIPPED VARIANCE SCALING)
     // ─────────────────────────────────────────────────────────────────
-    // Clamp vy_std to prevent unbounded positive feedback in k_beta
     float vy_std_clamped = GP_CLAMP(state->ekf.vy_std, 0.0f, 0.3f);
     float k_beta_dynamic = 4000.0f * (1.0f + 2.0f * vy_std_clamped);
-    
-    // FIX #4: Directly clamp the torque contribution authority of beta_term to ±600 Nm
     float beta_term = GP_CLAMP(-k_beta_dynamic * beta, -600.0f, 600.0f);
 
     float raw_int = state->wz_int + wz_err * dt * state->mz_sat_ratio;
@@ -191,29 +188,42 @@ void gp_tv_step(
     float counter_steer_factor = 1.0f - gp_sigmoid(-(delta * wz_corr + 0.05f) * 40.0f);
 
     // ─────────────────────────────────────────────────────────────────
+    // FRICTION/POWER BOUNDS — moved up here (was previously computed
+    // AFTER the yaw-moment policy selection below). The NMPC branch needs
+    // t_ub_friction[] to build a physically-grounded, speed/grip-aware
+    // Mz ceiling instead of the old fixed GP_NMPC_MZ_MAX constant, so the
+    // bound must exist before the policy #if runs.
+    // ─────────────────────────────────────────────────────────────────
+    float t_lb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float t_ub_friction[4];
+    float t_ub_power[4];
+
+    float mu_avg = 0.5f * (state->tc.mu_surface[0] + state->tc.mu_surface[1]);
+
+    gp_friction_ellipse_t_ub(fz_est, fy_est, mu_avg, t_ub_friction);
+    gp_power_limited_t_ub(omega, t_ub_power);
+
+    // ─────────────────────────────────────────────────────────────────
     // YAW MOMENT POLICY SELECTION (Branch 3 AL-QP vs. Branch 4 NMPC)
     // ─────────────────────────────────────────────────────────────────
     float mz_req = 0.0f;
 
+    float mz_friction_cap = 0.5f * (t_ub_friction[GP_RL] + t_ub_friction[GP_RR])
+                                * GP_TRACK_R / GP_R_WHEEL;
+    float mz_max_dyn  = GP_MIN(GP_NMPC_MZ_MAX, mz_friction_cap);
+    float mz_rate_max = GP_TV_RATE_LIMIT * dt * GP_TRACK_R / (2.0f * GP_R_WHEEL);
+
     #if defined(GP_TV_USE_NMPC) && (GP_TV_USE_NMPC == 1)
         // ── Branch 4: Embedded NMPC Predictive Yaw Controller ────────────
         float states_nmpc[3] = { vx, vy, wz_corr };
-        gp_nmpc_step(states_nmpc, delta, wz_ref, &state->nmpc, &mz_req);
+        gp_nmpc_step(states_nmpc, delta, wz_ref, dt, mz_max_dyn, mz_rate_max,
+                     &state->nmpc, &mz_req);
     #else
         // ── Branch 3: Feedback PID + Beta Stabilization ─────────────────
         float ff_mz = kd * delta_dot * (vx_safe / 10.0f);
         float fb_mz = kp * wz_err + ki * state->wz_int + beta_term;
         mz_req = GP_CLAMP((ff_mz + fb_mz) * os_gate * counter_steer_factor, -GP_TV_MAX_MZ, GP_TV_MAX_MZ);
     #endif
-    
-    float t_lb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    float t_ub_friction[4];
-    float t_ub_power[4];
-    
-    float mu_avg = 0.5f * (state->tc.mu_surface[0] + state->tc.mu_surface[1]);
-
-    gp_friction_ellipse_t_ub(fz_est, fy_est, mu_avg, t_ub_friction);
-    gp_power_limited_t_ub(omega, t_ub_power);
     
     // Derating Térmico (applies equally to drive AND regen — same silicon, same heat)
     float temp_limit = 75.0f;
