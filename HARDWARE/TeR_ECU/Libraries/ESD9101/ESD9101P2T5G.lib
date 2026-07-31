@@ -1,0 +1,28 @@
+EESchema-LIBRARY Version 2.3
+#encoding utf-8
+#SamacSys ECAD Model ESD9101P2T5G
+#/823134/893916/2.50/2/2/TVS Diode (Uni-directional)
+DEF ESD9101P2T5G D 0 30 Y Y 1 F N
+F0 "D" 400 350 50 H V L BNN
+F1 "ESD9101P2T5G" 400 250 50 H V L BNN
+F2 "SODFL1006X40N" 400 150 50 H I L BNN
+F3 "http://www.onsemi.com/pub/Collateral/ESD9101-D.PDF" 400 50 50 H I L BNN
+F4 "Low Capacitance ESD Protection Diodes for High Speed Data Lines" 400 -50 50 H I L BNN "Description"
+F5 "0.4" 400 -150 50 H I L BNN "Height"
+F6 "onsemi" 400 -250 50 H I L BNN "Manufacturer_Name"
+F7 "ESD9101P2T5G" 400 -350 50 H I L BNN "Manufacturer_Part_Number"
+F8 "863-ESD9101P2T5G" 400 -450 50 H I L BNN "Mouser Part Number"
+F9 "https://www.mouser.co.uk/ProductDetail/onsemi/ESD9101P2T5G?qs=5aG0NVq1C4ySlMx2D5w2xw%3D%3D" 400 -550 50 H I L BNN "Mouser Price/Stock"
+F10 "ESD9101P2T5G" 400 -650 50 H I L BNN "Arrow Part Number"
+F11 "https://www.arrow.com/en/products/esd9101p2t5g/on-semiconductor?region=nac" 400 -750 50 H I L BNN "Arrow Price/Stock"
+DRAW
+X ~ 1 0 0 200 R 50 50 0 0 P
+X ~ 2 600 0 200 L 50 50 0 0 P
+P 4 0 1 6 200 0 400 100 400 -100 200 0 N
+P 2 0 1 6 200 -80 240 -100 N
+P 2 0 1 6 200 -80 200 80 N
+P 2 0 1 6 160 100 200 80 N
+ENDDRAW
+ENDDEF
+#
+#End Library

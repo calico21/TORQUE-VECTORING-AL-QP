@@ -1,0 +1,6 @@
+[submodule "DBC"]
+	path = SOFTWARE/TeR_ECU/TER_DATABASES
+	url = https://github.com/Tecnun-eRacing/TER_DATABASES.git
+[submodule "SOFTWARE/TeR_ECU/TeR_DATABASES"]
+	path = SOFTWARE/TeR_ECU/TeR_DATABASES
+	url = https://github.com/Tecnun-eRacing/TeR_DATABASES.git
