@@ -3,6 +3,13 @@
 #include <math.h>
 #include "gp_torque_vectoring.h"
 #include "gp_params.h"
+#include "gp_math.h"
+
+// Función auxiliar de saturación suave para el presupuesto de regeneración
+static inline float gp_soft_cap(float val, float limit, float alpha) {
+    if (val <= 0.0f) return 0.0f;
+    return limit * tanhf(val * alpha / limit);
+}
 
 // ── Embedded ARM Hardware Profiling (Compiles ONLY for STM32 Target) ─
 #if defined(__arm__) || defined(__ARM_ARCH)

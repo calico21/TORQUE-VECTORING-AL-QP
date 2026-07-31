@@ -120,7 +120,8 @@ void gp_tc_step(
         state->kappa_prev[i] = state->kappa_filt[i];
         state->fx_prev[i] = fx_wheels[i];
         
-        if (fabsf(d_kappa) > 0.0001f && vx > 2.0f) {
+        float max_physical_dkappa = 0.30f * dt / 0.005f;
+        if (fabsf(d_kappa) > 0.0001f && fabsf(d_kappa) < max_physical_dkappa && vx > 2.0f) {
             float lambda = 0.985f; 
             float P = state->rls_P[i];
             float phi = d_kappa;
@@ -166,6 +167,7 @@ void gp_tc_step(
         
         float raw_integral = state->pi_integral[i] + error * dt * speed_gate;
         state->pi_integral[i] = GP_TC_I_MAX * tanhf(raw_integral / GP_TC_I_MAX); 
+        state->pi_integral[i] *= (1.0f - 0.002f); // Unconditional decay against integral windup
         
         float pi_out = kp_eff * error + ki_eff * state->pi_integral[i];
         
