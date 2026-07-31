@@ -7,23 +7,33 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
 
 def update_header_file(smooth_val, reg_val, kp_val):
-    """ Programmatically updates the #define macros in header files using explicit group references """
-    with open("inc/gp_solver.h", "r") as f:
-        content = f.read()
+    """ Programmatically updates tuning macros in inc/gp_params.h """
+    params_path = "inc/gp_params.h"
     
-    content = re.sub(r'(#define GP_W_SMOOTH\s+)[0-9\.]+(f?)', rf'\g<1>{smooth_val:.3f}f', content)
-    content = re.sub(r'(#define GP_W_REG\s+)[0-9\.]+(f?)', rf'\g<1>{reg_val:.3f}f', content)
+    c_smooth, c_reg, c_kp = 0, 0, 0
     
-    with open("inc/gp_solver.h", "w") as f:
-        f.write(content)
-
-    with open("inc/gp_traction_control.h", "r") as f:
-        tc_content = f.read()
-        
-    tc_content = re.sub(r'(#define GP_TC_KP\s+)[0-9\.]+(f?)', rf'\g<1>{kp_val:.3f}f', tc_content)
-    
-    with open("inc/gp_traction_control.h", "w") as f:
-        f.write(tc_content)
+    if os.path.exists(params_path):
+        with open(params_path, "r") as f:
+            lines = f.readlines()
+            
+        new_lines = []
+        for line in lines:
+            if "#define" in line:
+                if "GP_W_SMOOTH" in line:
+                    line = f"#define GP_W_SMOOTH   {smooth_val:.3f}f   // Actuator rate penalty weight\n"
+                    c_smooth += 1
+                elif "GP_W_REG" in line:
+                    line = f"#define GP_W_REG    {reg_val:.3f}f\n"
+                    c_reg += 1
+                elif "GP_TC_KP" in line:
+                    line = f"#define GP_TC_KP      {kp_val:.3f}f   // Traction control proportional gain\n"
+                    c_kp += 1
+            new_lines.append(line)
+            
+        with open(params_path, "w") as f:
+            f.writelines(new_lines)
+            
+    print(f"[DEBUG] Updates applied -> Smooth: {c_smooth}, Reg: {c_reg}, KP: {c_kp}")
 
 def compile_c_core():
     """ Re-compiles gp_core.so with the new weights """
@@ -34,10 +44,13 @@ def compile_c_core():
         "src/gp_solver.c",
         "src/gp_traction_control.c",
         "src/gp_torque_vectoring.c",
-        "-I.", "-Isrc", "-Iinc",
+        "src/gp_ekf.c",
+        "-I.", "-Isrc", "-Iinc", "-I../../TeR/Inc",
         "-o", "gp_core.so"
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("Compilation Error:", result.stderr)
     return result.returncode == 0
 
 def evaluate_in_subprocess():
@@ -49,8 +62,8 @@ from master_sanity_checks import TVState, run_scenario, scenario_limit_slalom
 
 try:
     gp_lib = ctypes.CDLL('./gp_core.so')
-except OSError:
-    print("ERR")
+except OSError as e:
+    print("ERR:", e)
     exit(1)
 
 gp_lib.gp_tv_step.argtypes = [
@@ -64,7 +77,8 @@ gp_lib.gp_tv_init.argtypes = [ctypes.POINTER(TVState)]
 time_steps = np.linspace(0, 3.0, 600)
 dt = time_steps[1] - time_steps[0]
 
-rl, rr, diff = run_scenario(time_steps, scenario_limit_slalom)
+scenario_res = run_scenario(time_steps, scenario_limit_slalom)
+rl, rr, diff = scenario_res[0], scenario_res[1], scenario_res[2]
 slew_rate = np.diff(rl) / dt
 rms_noise = np.std(slew_rate)
 
@@ -79,6 +93,10 @@ print(f"{cost:.2f}")
 """
     result = subprocess.run([sys.executable, "-c", eval_script], capture_output=True, text=True)
     if result.returncode != 0 or "ERR" in result.stdout:
+        print("--- SUBPROCESS ERROR TRACE ---")
+        print(result.stderr)
+        print(result.stdout)
+        print("------------------------------")
         return float('inf')
     try:
         return float(result.stdout.strip())
@@ -180,4 +198,4 @@ def run_bayesian_optimization(total_iterations=30, init_random=5):
     compile_c_core()
 
 if __name__ == "__main__":
-    run_bayesian_optimization(total_iterations=1000, init_random=20)
+    run_bayesian_optimization(total_iterations=500, init_random=20)

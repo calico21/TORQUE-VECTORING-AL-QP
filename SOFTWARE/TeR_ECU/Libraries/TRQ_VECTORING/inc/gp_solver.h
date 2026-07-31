@@ -2,7 +2,7 @@
 #define GP_SOLVER_H
 
 #include "gp_vehicle_model.h"
-#include "gp_params.h"   // GP_W_REG, GP_W_SMOOTH, GP_RHO_AL, GP_QP_ITER — canonical, see gp_params.h
+#include "gp_params.h"
 
 void gp_nominal_allocation(float fx_driver, float mz_target, float t_nom_out[4]);
 

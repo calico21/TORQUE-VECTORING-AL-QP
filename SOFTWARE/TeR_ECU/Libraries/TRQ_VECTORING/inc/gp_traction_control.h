@@ -7,7 +7,7 @@
 #define GP_TRACTION_CONTROL_H
 
 #include "gp_vehicle_model.h"
-#include "gp_params.h"  // GP_TC_KP, GP_TC_KI — canonical, see gp_params.h
+#include "gp_params.h"
 
 // ── Parámetros del Control de Tracción (Hoosier R20), NOT Bayesian-tuned ────
 #define GP_TC_B0             14.0f     // Rigidez Pacejka BCD sin carga
