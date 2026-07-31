@@ -95,56 +95,36 @@ class TVState(ctypes.Structure):
 # Structural Safety Assertions
 assert ctypes.sizeof(TCState) == 42 * 4, f"TCState size mismatch"
 
-try:
-    gp_lib = ctypes.CDLL('./gp_core.so')
-except OSError:
-    print("Error: No se encuentra gp_core.so. Compila primero con gcc -shared...")
-    exit(1)
+def _bind(lib):
+    lib.gp_tv_state_sizeof.restype = ctypes.c_size_t
+    assert ctypes.sizeof(TVState) == lib.gp_tv_state_sizeof(), \
+        f"TVState layout drift in {lib._name}: Python={ctypes.sizeof(TVState)} C={lib.gp_tv_state_sizeof()}"
 
-# Runtime size probe to guarantee layout synchronization
-gp_lib.gp_tv_state_sizeof.restype = ctypes.c_size_t
-assert ctypes.sizeof(TVState) == gp_lib.gp_tv_state_sizeof(), \
-    f"TVState layout drift: Python size ({ctypes.sizeof(TVState)}) != C size ({gp_lib.gp_tv_state_sizeof()})"
+    lib.gp_tv_step.argtypes = [
+        ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ctypes.POINTER(ctypes.c_float * 4),
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ctypes.c_float, ctypes.c_uint8,
+        ctypes.POINTER(GPRegenLimits),
+        ctypes.c_float,
+        ctypes.POINTER(TVState),
+        ctypes.POINTER(ctypes.c_float * 4),
+    ]
+    lib.gp_tv_init.argtypes = [ctypes.POINTER(TVState)]
+    lib.gp_nmpc_init.argtypes = [ctypes.POINTER(NMPCState)]
+    lib.gp_nmpc_step.argtypes = [
+        ctypes.POINTER(ctypes.c_float), ctypes.c_float, ctypes.c_float,
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ctypes.POINTER(NMPCState), ctypes.POINTER(ctypes.c_float),
+    ]
 
-# Firma actualizada para gp_tv_step (incluye vy_gps y gps_valid)
-gp_lib.gp_tv_step.argtypes = [
-    ctypes.c_float,                     # fx_driver
-    ctypes.c_float,                     # delta
-    ctypes.c_float,                     # vx
-    ctypes.c_float,                     # vy
-    ctypes.c_float,                     # wz
-    ctypes.c_float,                     # ay
-    ctypes.c_float,                     # ax
-    ctypes.POINTER(ctypes.c_float * 4), # omega
-    ctypes.c_float,                     # brake_norm
-    ctypes.c_float,                     # temp_inv_rl
-    ctypes.c_float,                     # temp_inv_rr
-    ctypes.c_float,                     # vy_gps
-    ctypes.c_uint8,                     # gps_valid
-    ctypes.POINTER(GPRegenLimits),      # regen
-    ctypes.c_float,                     # dt
-    ctypes.POINTER(TVState),            # state
-    ctypes.POINTER(ctypes.c_float * 4)  # t_out_c
-]
+_bind(gp_lib_alqp)
+_bind(gp_lib_nmpc)
 
-# NUEVO: Firma para gp_tv_init
-gp_lib.gp_tv_init.argtypes = [ctypes.POINTER(TVState)]
-
-# =====================================================================
-# CTYPES FUNCTION SIGNATURES (NMPC & SOLVER BINDINGS)
-# =====================================================================
-gp_lib.gp_nmpc_init.argtypes = [ctypes.POINTER(NMPCState)]
-
-gp_lib.gp_nmpc_step.argtypes = [
-    ctypes.POINTER(ctypes.c_float),  # states[3]
-    ctypes.c_float,                  # delta_sw
-    ctypes.c_float,                  # r_ref
-    ctypes.c_float,                  # dt_ctrl
-    ctypes.c_float,                  # mz_max
-    ctypes.c_float,                  # mz_rate_max
-    ctypes.POINTER(NMPCState),
-    ctypes.POINTER(ctypes.c_float),
-]
+gp_lib = gp_lib_alqp  # every Phase 1-13 helper below still says `gp_lib.` —
+                      # alias it to the real (non-NMPC) build instead of a
+                      # 40-line find/replace, so those results stay honest.
 
 # =====================================================================
 # 1.5. HARDWARE NON-IDEALITIES ENGINE (NOISE & LATENCY SIMULATOR)

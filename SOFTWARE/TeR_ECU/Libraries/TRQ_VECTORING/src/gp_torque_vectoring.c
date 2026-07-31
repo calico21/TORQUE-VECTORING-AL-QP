@@ -218,6 +218,19 @@ void gp_tv_step(
         float states_nmpc[3] = { vx, vy, wz_corr };
         gp_nmpc_step(states_nmpc, delta, wz_ref, dt, mz_max_dyn, mz_rate_max,
                      &state->nmpc, &mz_req);
+
+        // Same physical gates Branch 3 applies below. Without these, NMPC
+        // has no notion of "driver already countersteering" or "already at
+        // target yaw rate, back off" and keeps chasing wz_ref at full box
+        // authority through a reversal — this was the chattering root cause.
+        mz_req = GP_CLAMP(mz_req * os_gate * counter_steer_factor,
+                           -mz_max_dyn, mz_max_dyn);
+
+        // Persist the ACTUALLY REQUESTED (post box+slew+gate) Mz as next
+        // tick's warm-start/slew reference. Omitting this line is why
+        // u_warm was silently dead — the solve was rate-limiting itself
+        // against zero every tick regardless of what it commanded last.
+        state->nmpc.u_warm = mz_req;
     #else
         // ── Branch 3: Feedback PID + Beta Stabilization ─────────────────
         float ff_mz = kd * delta_dot * (vx_safe / 10.0f);
