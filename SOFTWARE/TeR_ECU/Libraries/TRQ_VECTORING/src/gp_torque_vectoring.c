@@ -277,6 +277,19 @@ void gp_tv_step(
         &qp_residual
     );
 
+    // --- POST-SOLVE TOTAL BUDGET ENFORCEMENT ---
+    // t_lb/t_ub bound each wheel independently, but when mz_req forces an
+    // asymmetric split, the combined magnitude can exceed max_total_trq.
+    // Rescale proportionally to preserve sign and ratio exactly.
+    if (rg->enable) {
+        float total_mag = fabsf(qp_result[GP_RL]) + fabsf(qp_result[GP_RR]);
+        if (total_mag > rg->max_total_trq && total_mag > 1e-3f) {
+            float scale = rg->max_total_trq / total_mag;
+            qp_result[GP_RL] *= scale;
+            qp_result[GP_RR] *= scale;
+        }
+    }
+
     float dt_req = t_nominal[GP_RR] - t_nominal[GP_RL];
     float dt_ach = qp_result[GP_RR] - qp_result[GP_RL];
     if (fabsf(dt_req) > 1.0f) {
@@ -293,6 +306,20 @@ void gp_tv_step(
         
         state->t_qp_prev[i] = tv_final;
         t_cmd_out[i] = tv_final;
+    }
+
+    // --- DEFENSIVE RATE-LIMIT RE-CHECK ---
+    // The independent per-wheel rate limiter can re-open a small budget violation 
+    // in the mixed-sign case. Catch it here on the actual command.
+    if (rg->enable) {
+        float total_mag = fabsf(t_cmd_out[GP_RL]) + fabsf(t_cmd_out[GP_RR]);
+        if (total_mag > rg->max_total_trq && total_mag > 1e-3f) {
+            float scale = rg->max_total_trq / total_mag;
+            t_cmd_out[GP_RL] *= scale;
+            t_cmd_out[GP_RR] *= scale;
+            state->t_qp_prev[GP_RL] = t_cmd_out[GP_RL];
+            state->t_qp_prev[GP_RR] = t_cmd_out[GP_RR];
+        }
     }
 
     // Low-level TC Step
