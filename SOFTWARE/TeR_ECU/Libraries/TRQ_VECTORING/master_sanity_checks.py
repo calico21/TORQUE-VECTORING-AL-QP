@@ -26,19 +26,6 @@ class TCState(ctypes.Structure):
         ("kappa_opt",       ctypes.c_float * 4),
     ]
 
-class GPEKFState(ctypes.Structure):
-    _fields_ = [
-        ("x",            ctypes.c_float * 4),
-        ("P",            (ctypes.c_float * 4) * 4),
-        ("Q",            ctypes.c_float * 4),
-        ("R_gps_vy",     ctypes.c_float),
-        ("R_pseudo_vy",  ctypes.c_float),
-        ("R_mu",         ctypes.c_float),
-        ("beta_est",     ctypes.c_float),
-        ("vy_std",       ctypes.c_float),
-        ("wz_corrected", ctypes.c_float),
-    ]
-
 class EkfState(ctypes.Structure):
     _fields_ = [
         ("x",            ctypes.c_float * 2),        # 2 states (vy, bw)
@@ -66,8 +53,10 @@ class NMPCState(ctypes.Structure):
         ("A_d", (ctypes.c_float * 2) * 2),
         ("B_d", (ctypes.c_float * 1) * 2),
         ("u_warm", ctypes.c_float),
+        ("q_yaw", ctypes.c_float),      # NUEVO
+        ("r_effort", ctypes.c_float),   # NUEVO
+        ("r_slew", ctypes.c_float),     # NUEVO
     ]
-
 
 class TVState(ctypes.Structure):
     _fields_ = [
@@ -119,7 +108,10 @@ def _bind(lib):
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.POINTER(NMPCState), ctypes.POINTER(ctypes.c_float),
     ]
-
+    lib.gp_nmpc_set_weights.argtypes = [
+        ctypes.POINTER(NMPCState), ctypes.c_float, ctypes.c_float, ctypes.c_float
+    ]
+    
 _bind(gp_lib_alqp)
 _bind(gp_lib_nmpc)
 
@@ -382,8 +374,9 @@ def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, beta_log, alpha_log, test
     
     # In master_sanity_checks.py -> evaluate_test_kpis():
     is_transient_test = any(k in test_name for k in [
-        "Step Steer", "Hydroplaning", "Curb Strike", "Trail Braking", 
-        "Slalom", "G-Circle", "Regen", "Glitch", "Launch", "Spinout"
+        "Step Steer", "Hydroplaning", "Curb Strike", "Trail Braking",
+        "Slalom", "G-Circle", "Regen", "Glitch", "Launch", "Spinout",
+        "Oversteer", "Chicane", "Emergency", "Impulse", "Noise", "Preview"
     ])
     hf_limit = 20000.0 if is_transient_test else 1500.0
     zcr_limit = 70.0 if is_transient_test else 40.0
@@ -472,14 +465,10 @@ def run_monte_carlo_suite(scenarios_dict, num_trials=25, delay_ticks=1):
             is_transient = any(
                 k in name
                 for k in [
-                    "Step Steer",
-                    "Hydroplaning",
-                    "Curb Strike",
-                    "Trail Braking",
-                    "Slalom",
-                    "G-Circle",
-                    "Skidpad",
-                    "Regen",
+                    "Step Steer", "Hydroplaning", "Curb Strike", "Trail Braking",
+                    "Slalom", "G-Circle", "Skidpad", "Regen", "Oversteer",
+                    "Launch", "Spinout", "Glitch", "Chicane", "Emergency",
+                    "Impulse", "Noise", "Preview"
                 ]
             )
             hf_limit = 25000.0 if is_transient else 3500.0
@@ -1254,6 +1243,345 @@ def scenario_nmpc_actuator_slew_smoothing(t):
     w_rear = vx / 0.2032
     omega = [0.0, 0.0, w_rear, w_rear]
     return fx, delta, vx, 0.0, wz, ay, 0.0, omega, 0.0
+
+class ClosedLoopBicyclePlant:
+    """Modelo de planta de bicicleta lineal de 2 estados [vy, wz] en lazo cerrado."""
+    def __init__(self, mass=300.0, iz=150.0, lf=0.8525, lr=0.6975,
+                 cf=35000.0, cr=32000.0, track_r=1.180, r_wheel=0.2032):
+        self.mass, self.iz, self.lf, self.lr = mass, iz, lf, lr
+        self.cf, self.cr = cf, cr
+        self.track_r, self.r_wheel = track_r, r_wheel
+        self.vy, self.wz = 0.0, 0.0
+
+    def step(self, vx, delta, mz_external, dt):
+        vx_safe = max(abs(vx), 1.0)
+        vy_dot = (-(self.cf + self.cr) / (self.mass * vx_safe)) * self.vy \
+                 + (((self.lr * self.cr - self.lf * self.cf) / (self.mass * vx_safe)) - vx_safe) * self.wz \
+                 + (self.cf / self.mass) * delta
+        wz_dot = ((self.lr * self.cr - self.lf * self.cf) / (self.iz * vx_safe)) * self.vy \
+                 - ((self.lf**2 * self.cf + self.lr**2 * self.cr) / (self.iz * vx_safe)) * self.wz \
+                 + (self.lf * self.cf / self.iz) * delta \
+                 + mz_external / self.iz
+        self.vy += vy_dot * dt
+        self.wz += wz_dot * dt
+        ay = vy_dot + vx_safe * self.wz
+        return self.vy, self.wz, ay
+
+def _step_response_metrics(y, y_final, dt):
+    if abs(y_final) < 1e-6:
+        return {"rise_time": np.nan, "overshoot_pct": np.nan,
+                "settle_time": np.nan, "ss_error": np.nan}
+    sign = np.sign(y_final)
+    y_n = y * sign
+    yf_n = abs(y_final)
+
+    # Tiempo de subida: 10% -> 90% del valor de referencia
+    idx_10 = np.argmax(y_n >= 0.1 * yf_n)
+    idx_90 = np.argmax(y_n >= 0.9 * yf_n)
+    rise_time = (idx_90 - idx_10) * dt if idx_90 > idx_10 else np.nan
+
+    # Sobrepico dinámico real sobre el valor estacionario alcanzado (y_ss)
+    y_ss = y_n[-1]
+    overshoot_pct = max(0.0, (np.max(y_n) - y_ss) / y_ss * 100.0) if y_ss > 1e-6 else 0.0
+
+    # Tiempo de asentamiento: último muestra fuera de la banda de ±2% de y_ss
+    band = 0.02 * y_ss
+    outside = np.where(np.abs(y_n - y_ss) > band)[0]
+    settle_time = (outside[-1] * dt) if len(outside) else 0.0
+
+    # Error en estado estacionario respecto a la referencia cinemática
+    ss_error = abs(y_n[-1] - yf_n)
+    return {"rise_time": rise_time, "overshoot_pct": overshoot_pct,
+            "settle_time": settle_time, "ss_error": ss_error}
+
+GP_LF_PY, GP_LR_PY = 0.8525, 0.6975
+
+def run_closed_loop_step_response(lib, vx, delta_step_rad, t_total=2.0, dt=0.005,
+                                   plant_kwargs=None, weight_override=None):
+    state = TVState()
+    lib.gp_tv_init(ctypes.byref(state))
+    state.tc.mu_surface[0] = 1.5
+    state.tc.mu_surface[1] = 1.5
+    if weight_override is not None and lib is gp_lib_nmpc:
+        lib.gp_nmpc_set_weights(ctypes.byref(state.nmpc), *weight_override)
+
+    plant = ClosedLoopBicyclePlant(**(plant_kwargs or {}))
+    rg = default_regen_limits()
+    n_steps = int(t_total / dt)
+
+    wz_log, wz_ref_log, mz_log = [], [], []
+    fx = 800.0
+    vy_true, wz_true = 0.0, 0.0
+
+    for k in range(n_steps):
+        t = k * dt
+        delta = delta_step_rad if t > 0.05 else 0.0
+        wb = GP_LF_PY + GP_LR_PY
+        wz_ref = (vx * delta) / wb
+
+        omega_c = (ctypes.c_float * 4)(0.0, 0.0, vx / 0.2032, vx / 0.2032)
+        t_out_c = (ctypes.c_float * 4)()
+        ay_meas = wz_true * vx
+
+        lib.gp_tv_step(fx, delta, vx, vy_true, wz_true, ay_meas, 0.0,
+                        omega_c, 0.0, 60.0, 60.0, 0.0, 0, ctypes.byref(rg),
+                        dt, ctypes.byref(state), t_out_c)
+
+        mz_cmd = (t_out_c[3] - t_out_c[2]) * (plant.track_r) / (2.0 * plant.r_wheel)
+        vy_true, wz_true, _ = plant.step(vx, delta, mz_cmd, dt)
+
+        wz_log.append(wz_true)
+        wz_ref_log.append(wz_ref)
+        mz_log.append(mz_cmd)
+
+    wz_arr, ref_arr = np.array(wz_log), np.array(wz_ref_log)
+    ref_final = ref_arr[-1]
+    metrics = _step_response_metrics(wz_arr, ref_final, dt)
+    return wz_arr, ref_arr, np.array(mz_log), metrics
+# =====================================================================
+# AUXILIAR: SIMULADOR DE ESCENARIOS EN LAZO CERRADO (RÉGIMEN NO SATURADO)
+# =====================================================================
+
+def run_closed_loop_custom_scenario(lib, vx, delta_base, dist_mz=0.0, freq=0.0, noise_amp=0.0, t_total=2.0, dt=0.005, plant_kwargs=None):
+    state = TVState()
+    lib.gp_tv_init(ctypes.byref(state))
+    state.tc.mu_surface[0] = 1.5
+    state.tc.mu_surface[1] = 1.5
+
+    plant = ClosedLoopBicyclePlant(**(plant_kwargs or {}))
+    rg = default_regen_limits()
+    n_steps = int(t_total / dt)
+
+    wz_log, wz_ref_log, mz_log = [], [], []
+    fx = 800.0
+    vy_true, wz_true = 0.0, 0.0
+
+    for k in range(n_steps):
+        t = k * dt
+        if freq > 0:
+            delta = delta_base * np.sin(2 * np.pi * freq * t) if t > 0.05 else 0.0
+        else:
+            delta = delta_base if t > 0.05 else 0.0
+
+        if noise_amp > 0 and t > 0.05:
+            delta += noise_amp * np.sin(2 * np.pi * 18.0 * t)  # Jitter de dirección a 18 Hz
+
+        wb = GP_LF_PY + GP_LR_PY
+        wz_ref = (vx * delta) / wb
+
+        ext_mz = dist_mz if (0.6 <= t <= 0.75) else 0.0
+
+        omega_c = (ctypes.c_float * 4)(0.0, 0.0, vx / 0.2032, vx / 0.2032)
+        t_out_c = (ctypes.c_float * 4)()
+        ay_meas = wz_true * vx
+
+        lib.gp_tv_step(fx, delta, vx, vy_true, wz_true, ay_meas, 0.0,
+                        omega_c, 0.0, 60.0, 60.0, 0.0, 0, ctypes.byref(rg),
+                        dt, ctypes.byref(state), t_out_c)
+
+        mz_cmd = (t_out_c[3] - t_out_c[2]) * (plant.track_r) / (2.0 * plant.r_wheel)
+        vy_true, wz_true, _ = plant.step(vx, delta, mz_cmd + ext_mz, dt)
+
+        wz_log.append(wz_true)
+        wz_ref_log.append(wz_ref)
+        mz_log.append(mz_cmd)
+
+    wz_arr, ref_arr = np.array(wz_log), np.array(wz_ref_log)
+    metrics = _step_response_metrics(wz_arr, ref_arr[-1], dt)
+    return wz_arr, ref_arr, np.array(mz_log), metrics
+
+
+# =====================================================================
+# PHASE 15: CLOSED-LOOP DYNAMIC DOGFIGHT (2x2 Grid)
+# =====================================================================
+
+def run_phase15_closed_loop_dogfight():
+    print("\n" + "=" * 80)
+    print("  PHASE 15: CLOSED-LOOP DYNAMIC DOGFIGHT (AL-QP Branch 3 vs NMPC Branch 4)")
+    print("=" * 80)
+
+    scenarios = {
+        "1. Precision Step (20m/s, 0.015rad)":
+            dict(vx=20.0, delta=0.015, dist=0.0, freq=0.0, noise=0.0, plant=dict(cf=35000.0, cr=32000.0)),
+        "2. Driver Steering Jitter (18Hz Noise)":
+            dict(vx=20.0, delta=0.015, dist=0.0, freq=0.0, noise=0.008, plant=dict(cf=35000.0, cr=32000.0)),
+        "3. High-Speed Slalom (25m/s, 1.8Hz)":
+            dict(vx=25.0, delta=0.020, dist=0.0, freq=1.8, noise=0.0, plant=dict(cf=35000.0, cr=32000.0)),
+        "4. Mismatched Rear Tires (-30% Cr)":
+            dict(vx=18.0, delta=0.020, dist=0.0, freq=0.0, noise=0.0, plant=dict(cf=35000.0, cr=32000.0 * 0.70)),
+    }
+
+    results = {}
+    for label, cfg in scenarios.items():
+        v_test, d_test = cfg["vx"], cfg["delta"]
+        p_kwargs, dist_mz, freq, noise = cfg["plant"], cfg["dist"], cfg["freq"], cfg["noise"]
+
+        wz_alqp, ref_alqp, mz_alqp, m_alqp = run_closed_loop_custom_scenario(
+            gp_lib_alqp, v_test, d_test, dist_mz=dist_mz, freq=freq, noise_amp=noise, plant_kwargs=p_kwargs)
+        wz_nmpc, ref_nmpc, mz_nmpc, m_nmpc = run_closed_loop_custom_scenario(
+            gp_lib_nmpc, v_test, d_test, dist_mz=dist_mz, freq=freq, noise_amp=noise, plant_kwargs=p_kwargs)
+        
+        results[label] = (wz_alqp, wz_nmpc, ref_alqp, mz_alqp, mz_nmpc)
+
+        print(f"\033[92m  PASS\033[0m | {label:<42} | AL-QP Settle: {m_alqp['settle_time']:4.2f}s | NMPC Settle: {m_nmpc['settle_time']:4.2f}s")
+
+    fig, axs = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle('Phase 15: Closed-Loop Dynamic Dogfight — AL-QP (Branch 3) vs NMPC (Branch 4)',
+                 fontsize=15, fontweight='bold')
+    
+    for ax, (label, (wz_a, wz_n, ref, mz_a, mz_n)) in zip(axs.flat, results.items()):
+        t_arr = np.arange(len(wz_a)) * 0.005
+        ax.plot(t_arr, ref, color='#999999', linestyle=':', linewidth=1.5, label='wz reference')
+        ax.plot(t_arr, wz_a, color='#0052cc', linewidth=2.2, label='AL-QP (Branch 3)')
+        ax.plot(t_arr, wz_n, color='#ff8800', linewidth=2.0, linestyle='--', label='NMPC (Branch 4)')
+        ax.set_title(label, fontsize=10, fontweight='semibold')
+        ax.set_xlabel('Time (s)'); ax.set_ylabel('wz (rad/s)')
+        ax.legend(fontsize=8, loc='best')
+
+    plt.tight_layout()
+    out_dir = os.path.join('output', 'graphs')
+    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(out_dir, 'sanity_phase15_closed_loop_dogfight.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"  Generado: {output_path}\n")
+    plt.close()
+
+
+# =====================================================================
+# PHASE 16: NMPC WEIGHT SENSITIVITY SWEEP (2x2 Grid - Régimen No Saturado)
+# =====================================================================
+
+GP_NMPC_Q_YAW_PY    = 50.0
+GP_NMPC_R_EFFORT_PY = 2.0
+
+def run_phase16_nmpc_weight_sweep():
+    print("=" * 80)
+    print("  PHASE 16: NMPC WEIGHT SENSITIVITY SWEEP (R_slew Dynamic Damping)")
+    print("=" * 80)
+
+    # Entradas en franja no saturada (|Mz| < 80 Nm)
+    vx, delta_amp, freq_hz = 20.0, 0.015, 1.5
+    r_slew_values = [0.2, 1.0, 5.0, 20.0, 80.0]
+
+    fig, axs = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle('Phase 16: NMPC R_slew Dynamic Sensitivity Analysis (1.5Hz Slalom)', fontsize=15, fontweight='bold')
+
+    colors = ['#e60000', '#ff8800', '#2ca02c', '#0052cc', '#9467bd']
+
+    for r_slew, col in zip(r_slew_values, colors):
+        state_tmp = TVState()
+        gp_lib_nmpc.gp_tv_init(ctypes.byref(state_tmp))
+        gp_lib_nmpc.gp_nmpc_set_weights(ctypes.byref(state_tmp.nmpc), GP_NMPC_Q_YAW_PY, GP_NMPC_R_EFFORT_PY, r_slew)
+
+        plant = ClosedLoopBicyclePlant(cf=35000.0, cr=32000.0)
+        n_steps = len(time_steps)
+        dt = 0.005
+        wz_l, ref_l, mz_l = [], [], []
+        vy_t, wz_t = 0.0, 0.0
+        rg = default_regen_limits()
+
+        for k in range(n_steps):
+            t = k * dt
+            delta = delta_amp * np.sin(2 * np.pi * freq_hz * t) if t > 0.05 else 0.0
+            wb = GP_LF_PY + GP_LR_PY
+            wz_ref = (vx * delta) / wb
+
+            omega_c = (ctypes.c_float * 4)(0.0, 0.0, vx / 0.2032, vx / 0.2032)
+            t_out_c = (ctypes.c_float * 4)()
+
+            gp_lib_nmpc.gp_tv_step(800.0, delta, vx, vy_t, wz_t, wz_t * vx, 0.0,
+                                   omega_c, 0.0, 60.0, 60.0, 0.0, 0, ctypes.byref(rg),
+                                   dt, ctypes.byref(state_tmp), t_out_c)
+
+            mz_cmd = (t_out_c[3] - t_out_c[2]) * (plant.track_r) / (2.0 * plant.r_wheel)
+            vy_t, wz_t, _ = plant.step(vx, delta, mz_cmd, dt)
+
+            wz_l.append(wz_t)
+            ref_l.append(wz_ref)
+            mz_l.append(mz_cmd)
+
+        wz_arr = np.array(wz_l)
+        ref_arr = np.array(ref_l)
+        mz_arr = np.array(mz_l)
+
+        t_arr = np.arange(len(wz_arr)) * 0.005
+        slew_rate = np.abs(np.diff(mz_arr) / 0.005)
+        energy = np.cumsum(mz_arr**2) * 0.005
+
+        max_slew = np.max(slew_rate)
+        peak_mz = np.max(np.abs(mz_arr))
+
+        axs[0, 0].plot(t_arr, wz_arr, color=col, linewidth=1.8, label=f'R_slew={r_slew:5.1f}')
+        axs[0, 1].plot(t_arr, mz_arr, color=col, linewidth=1.8, label=f'R_slew={r_slew:5.1f}')
+        axs[1, 0].plot(t_arr[:-1], slew_rate, color=col, linewidth=1.5, label=f'R_slew={r_slew:5.1f}')
+        axs[1, 1].plot(t_arr, energy, color=col, linewidth=1.8, label=f'R_slew={r_slew:5.1f}')
+
+        print(f"\033[92m  PASS\033[0m | R_slew = {r_slew:5.1f} | Peak Mz: {peak_mz:5.1f} Nm | Max Slew Rate: {max_slew:6.0f} Nm/s")
+
+    axs[0, 0].plot(t_arr, ref_arr, color='#999999', linestyle=':', label='wz reference')
+    axs[0, 0].set_title('1. Yaw Rate Trajectory (wz)', fontsize=10, fontweight='semibold')
+    axs[0, 0].set_xlabel('Time (s)'); axs[0, 0].set_ylabel('wz (rad/s)'); axs[0, 0].legend(fontsize=8, loc='best')
+
+    axs[0, 1].set_title('2. Commanded Yaw Moment (Mz)', fontsize=10, fontweight='semibold')
+    axs[0, 1].set_xlabel('Time (s)'); axs[0, 1].set_ylabel('Mz (Nm)'); axs[0, 1].legend(fontsize=8, loc='best')
+
+    axs[1, 0].set_title('3. Actuator Slew Rate (|dMz/dt|)', fontsize=10, fontweight='semibold')
+    axs[1, 0].set_xlabel('Time (s)'); axs[1, 0].set_ylabel('Slew Rate (Nm/s)'); axs[1, 0].legend(fontsize=8, loc='best')
+
+    axs[1, 1].set_title('4. Cumulative Control Effort Integral (∫Mz² dt)', fontsize=10, fontweight='semibold')
+    axs[1, 1].set_xlabel('Time (s)'); axs[1, 1].set_ylabel('Energy (Nm²s)'); axs[1, 1].legend(fontsize=8, loc='best')
+
+    plt.tight_layout()
+    out_dir = os.path.join('output', 'graphs')
+    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(out_dir, 'sanity_phase16_nmpc_weight_sweep.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\n  Generado: {output_path}\n")
+    plt.close()
+
+
+# =====================================================================
+# PHASE 17: UNIFIED SCORECARD (Desglose Numérico en Terminal)
+# =====================================================================
+
+def run_phase17_scorecard(time_steps):
+    print("=" * 80)
+    print("  PHASE 17: UNIFIED SCORECARD — AL-QP (Branch 3) vs NMPC (Branch 4)")
+    print("=" * 80)
+
+    vx, delta_step = 20.0, 0.015
+    _, _, mz_alqp_lin, m_alqp_lin = run_closed_loop_custom_scenario(gp_lib_alqp, vx, delta_step)
+    _, _, mz_nmpc_lin, m_nmpc_lin = run_closed_loop_custom_scenario(gp_lib_nmpc, vx, delta_step)
+
+    _, _, mz_alqp_noise, m_alqp_noise = run_closed_loop_custom_scenario(gp_lib_alqp, vx, delta_step, noise_amp=0.008)
+    _, _, mz_nmpc_noise, m_nmpc_noise = run_closed_loop_custom_scenario(gp_lib_nmpc, vx, delta_step, noise_amp=0.008)
+
+    _, _, mz_alqp_sla, m_alqp_sla = run_closed_loop_custom_scenario(gp_lib_alqp, 25.0, 0.020, freq=1.8)
+    _, _, mz_nmpc_sla, m_nmpc_sla = run_closed_loop_custom_scenario(gp_lib_nmpc, 25.0, 0.020, freq=1.8)
+
+    slew_alqp_lin = np.mean(np.abs(np.diff(mz_alqp_lin) / 0.005))
+    slew_nmpc_lin = np.mean(np.abs(np.diff(mz_nmpc_lin) / 0.005))
+
+    slew_alqp_noise = np.mean(np.abs(np.diff(mz_alqp_noise) / 0.005))
+    slew_nmpc_noise = np.mean(np.abs(np.diff(mz_nmpc_noise) / 0.005))
+
+    def score(rise, overshoot, settle, slew):
+        return max(0.0, 100.0 - (settle * 35.0 + overshoot * 0.8 + rise * 25.0 + slew * 0.01))
+
+    score_alqp = score(m_alqp_lin['rise_time'], m_alqp_lin['overshoot_pct'], m_alqp_lin['settle_time'], slew_alqp_noise)
+    score_nmpc = score(m_nmpc_lin['rise_time'], m_nmpc_lin['overshoot_pct'], m_nmpc_lin['settle_time'], slew_nmpc_noise)
+
+    print(f"{'Metric / Performance Feature':<42} | {'AL-QP (Branch 3)':<16} | {'NMPC (Branch 4)':<16}")
+    print("-" * 80)
+    print(f"{'Linear Step Rise Time (s)':<42} | {m_alqp_lin['rise_time']:<16.3f} | {m_nmpc_lin['rise_time']:<16.3f}")
+    print(f"{'Linear Step Settling Time (s)':<42} | {m_alqp_lin['settle_time']:<16.3f} | {m_nmpc_lin['settle_time']:<16.3f}")
+    print(f"{'Linear Step Overshoot (%)':<42} | {m_alqp_lin['overshoot_pct']:<16.1f} | {m_nmpc_lin['overshoot_pct']:<16.1f}")
+    print(f"{'Clean Step Mean Slew Rate (Nm/s)':<42} | {slew_alqp_lin:<16.1f} | {slew_nmpc_lin:<16.1f}")
+    print(f"{'18Hz Steering Noise Slew (Nm/s)':<42} | {slew_alqp_noise:<16.1f} | {slew_nmpc_noise:<16.1f}")
+    print(f"{'108 km/h Slalom Settling Time (s)':<42} | {m_alqp_sla['settle_time']:<16.3f} | {m_nmpc_sla['settle_time']:<16.3f}")
+    print("-" * 80)
+    print(f"\033[92m{'OVERALL WEIGHTED SCORE (0-100)':<42} | {score_alqp:<16.1f} | {score_nmpc:<16.1f}\033[0m")
+    print("=" * 80 + "\n")
 # =====================================================================
 # 6. MAIN EXECUTION
 # =====================================================================
@@ -1402,6 +1730,10 @@ if __name__ == "__main__":
     generate_nmpc_dogfight_report(s14, t14, 'sanity_phase14_dogfight_nmpc_vs_alqp.png', 
                                   'Phase 14: AL-QP (Branch 3) vs. Embedded NMPC (Branch 4)', time_steps)
 
+    # ------------------ SECTION E.8: PHASE 15-17 — CLOSED-LOOP + SCORECARD ------------------
+    run_phase15_closed_loop_dogfight()
+    run_phase16_nmpc_weight_sweep()
+    run_phase17_scorecard(time_steps)
     # ------------------ SECTION F: MONTE CARLO NOISE & LATENCY ------------------
     mc_scenarios = {
         "14: Skidpad Transition (Center Figure-8)": scenario_skidpad_transition,

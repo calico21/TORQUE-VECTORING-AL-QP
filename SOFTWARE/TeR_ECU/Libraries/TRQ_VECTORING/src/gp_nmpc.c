@@ -6,6 +6,10 @@
 void gp_nmpc_init(gp_nmpc_state_t *state) {
     if (!state) return;
     memset(state, 0, sizeof(gp_nmpc_state_t));
+    // Asigna los valores por defecto definidos en gp_params.h
+    state->q_yaw    = GP_NMPC_Q_YAW;
+    state->r_effort = GP_NMPC_R_EFFORT;
+    state->r_slew   = GP_NMPC_R_SLEW;
 }
 
 void gp_nmpc_compute_jacobians(float v_x,
@@ -36,14 +40,17 @@ static void gp_nmpc_discretize(float v_x, float dt, float A_d[2][2], float B_d[2
     B_d[1] = B_c[1][0] * dt;
 }
 
-void gp_nmpc_step(const float states[3],
-                   float delta_sw,
-                   float r_ref,
-                   float dt_ctrl,
-                   float mz_max,
-                   float mz_rate_max,
-                   gp_nmpc_state_t *nmpc_state,
-                   float *mz_cmd)
+void gp_nmpc_set_weights(gp_nmpc_state_t *state, float q_yaw, float r_effort, float r_slew) {
+    if (!state) return;
+    // Protección contra valores nulos o negativos que romperían la matriz QP
+    state->q_yaw    = GP_MAX(q_yaw,    0.0f);
+    state->r_effort = GP_MAX(r_effort, 0.5f);
+    state->r_slew   = GP_MAX(r_slew,   0.5f);
+}
+
+void gp_nmpc_step(const float states[3], float delta_sw, float r_ref,
+                   float dt_ctrl, float mz_max, float mz_rate_max,
+                   gp_nmpc_state_t *nmpc_state, float *mz_cmd)
 {
     if (!states || !nmpc_state || !mz_cmd) return;
     if (isnan(states[0]) || isnan(states[1]) || isnan(states[2]) ||
@@ -64,7 +71,7 @@ void gp_nmpc_step(const float states[3],
     float f_vy = (Cf / m) * delta_sw * dt_ctrl;
     float f_r  = (a * Cf / Iz) * delta_sw * dt_ctrl;
 
-    // 1. Free response (u = 0) — identical role to the old x_pred, kept for telemetry.
+    // 1. Respuesta libre (u = 0)
     float x0 = vy0, x1 = r0;
     nmpc_state->x_pred[0][0] = x0;
     nmpc_state->x_pred[0][1] = x1;
@@ -78,11 +85,7 @@ void gp_nmpc_step(const float states[3],
         r_free[k] = x1;
     }
 
-    // 2. CORRECTED sensitivity: d(r_pred[k+1])/d(Mz held constant 0..k),
-    // via the SAME A_d,B_d recursion used above — replaces the old plain
-    // cumulative-sum-of-B, which implicitly assumed A == Identity and so
-    // ignored yaw-rate self-damping. This was the dominant reason the old
-    // internal gain model didn't match the plant it was built from.
+    // 2. Sensibilidad d(r_pred)/d(Mz)
     float s0 = 0.0f, s1 = 0.0f, C[GP_NMPC_N];
     for (int k = 0; k < GP_NMPC_N; k++) {
         float ns0 = A_d[0][0]*s0 + A_d[0][1]*s1 + B_d[0];
@@ -91,30 +94,42 @@ void gp_nmpc_step(const float states[3],
         C[k] = s1;
     }
 
-    // 3. Single-decision-variable batch QP (control horizon = 1, held over
-    // the prediction horizon) — now actually using the tuned weights from
-    // gp_params.h instead of local magic numbers.
-    float Q_r = GP_NMPC_Q_YAW, R_u = GP_NMPC_R_EFFORT, R_slew = GP_NMPC_R_SLEW;
+    // Normalize q_yaw against the SAME ΣC[k]² that appears in H, computed
+    // ONCE from the live (unmodified) C[k] array — not against C[N-1] alone,
+    // and NOT combined with re-normalizing C[k] itself inside the loop.
+    // This way Q_r * ΣC[k]² == q_yaw exactly, by construction: q_yaw,
+    // r_effort, and r_slew all land in the same comparable units regardless
+    // of vx, with no compounding.
+    float c_sum_sq = 0.0f;
+    for (int k = 0; k < GP_NMPC_N; k++) {
+        c_sum_sq += C[k] * C[k];
+    }
+    c_sum_sq = GP_MAX(c_sum_sq, 1e-12f);   // guard vx -> 0
+
+    float Q_r    = nmpc_state->q_yaw / c_sum_sq;
+    float R_u    = nmpc_state->r_effort;
+    float R_slew = nmpc_state->r_slew;
+
     float H = R_u + R_slew;
     float g = -R_slew * nmpc_state->u_warm;
     for (int k = 0; k < GP_NMPC_N; k++) {
         float r_err = r_free[k] - r_ref;
-        H += Q_r * C[k] * C[k];
+        H += Q_r * C[k] * C[k];      // raw C[k] — no second normalization
         g += Q_r * C[k] * r_err;
     }
     float u_unc = -g / (H + 1e-8f);
     if (isnan(u_unc) || isinf(u_unc)) u_unc = 0.0f;
 
-    // 4. Smooth soft-cap constraints for slew rate and magnitude
+    // 4. Limitación suave de derivadas y magnitud
     float center = nmpc_state->u_warm;
     float delta_u = u_unc - center;
     
-    // Stage 1: Soft-cap slew rate delta relative to mz_rate_max
     float delta_mag = gp_soft_cap(fabsf(delta_u), mz_rate_max, 1.0f / GP_NMPC_SOFTNESS);
     float u_slewed = center + copysignf(delta_mag, delta_u);
 
-    // Stage 2: Soft-cap total moment magnitude relative to mz_max
     float mag = gp_soft_cap(fabsf(u_slewed), mz_max, 1.0f / GP_NMPC_SOFTNESS);
     *mz_cmd = copysignf(mag, u_slewed);
-    // u_warm is intentionally NOT updated here — see caller.
+
+    // Guardar memoria de par previo para la penalización de slew rate del siguiente ciclo
+    nmpc_state->u_warm = *mz_cmd;
 }

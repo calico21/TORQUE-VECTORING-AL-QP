@@ -24,8 +24,14 @@ typedef struct {
     float x_pred[GP_NMPC_N + 1][GP_NMPC_STATES];
     float A_d[GP_NMPC_STATES][GP_NMPC_STATES];
     float B_d[GP_NMPC_STATES][GP_NMPC_INPUTS];
-    float u_warm;   // last APPLIED Mz (post box+slew+gates) — caller must persist this
+    float u_warm;
+    // Pesos de costo reconfigurables en runtime:
+    float q_yaw;
+    float r_effort;
+    float r_slew;
 } gp_nmpc_state_t;
+
+void gp_nmpc_set_weights(gp_nmpc_state_t *state, float q_yaw, float r_effort, float r_slew);
 
 void gp_nmpc_init(gp_nmpc_state_t *state);
 
