@@ -572,7 +572,12 @@ def run_regen_budget_ramp():
         rg = default_regen_limits(enable=1, max_total_trq=budget, max_charge_power_w=40000.0)
 
         vx, delta, wz, ay = 20.0, 0.15, 0.3, 2.0
-        fx = -250.0  # constant heavy regen demand throughout
+        fx = -2000.0  # was -250.0: demand (50.8 Nm) never approached the
+                       # 300->20 Nm budget, so this scenario never exercised
+                       # the soft-cap rescale it exists to test. -2000N gives
+                       # a friction-ellipse ceiling (~316 Nm) that sits just
+                       # above the budget's starting point, so the budget is
+                       # the binding constraint for ~the entire ramp.
         w_rear = vx / 0.2032
         omega_c = (ctypes.c_float * 4)(0.0, 0.0, w_rear, w_rear)
         t_out_c = (ctypes.c_float * 4)()
@@ -593,7 +598,18 @@ def run_regen_budget_ramp():
 def run_regen_thermal_derate():
     """Runs scenario_regen_thermal_derate with a time-varying inverter
     temperature (scenario_regen_thermal_derate_temps), which run_scenario()
-    can't express since it holds temps fixed at 60/60C for the whole trace."""
+    can't express since it holds temps fixed at 60/60C for the whole trace.
+
+    The 'expected' ceiling is built from the ACTUAL friction-derived bound
+    the solver computes internally (state.t_lb_rl_filt / t_lb_rr_filt,
+    already exposed in TVState) combined with an independently-computed
+    power+derate term. Only the power+derate half is reproduced in Python;
+    the friction half comes straight from telemetry, so there's no
+    tire/aero model to get wrong a second time (previous attempt: guessed
+    16000W, meant to land ~163 Nm/wheel, actually computed 800 Nm/wheel --
+    an arithmetic slip, not a logic error -- so power was never within an
+    order of magnitude of friction and never became the binding term until
+    derate had crushed it far past irrelevance)."""
     time_steps = np.linspace(0, 3.0, 600)
     dt = time_steps[1] - time_steps[0]
 
@@ -601,9 +617,18 @@ def run_regen_thermal_derate():
     gp_lib.gp_tv_init(ctypes.byref(state))
     state.tc.mu_surface[0] = 1.5
     state.tc.mu_surface[1] = 1.5
-    rg = default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=40000.0)
 
-    rl_log, rr_log, temp_log = [], [], []
+    # Calibration target: cool-temp power bound (t_power = P/omega_safe,
+    # omega_safe ~= vx = 20 m/s here) should sit NEAR the real friction
+    # bound (printed below at runtime) so the 75C crossing is an actual
+    # knee, not a ceiling that was never in range. Verify the printed
+    # calibration line below on every run -- don't trust this constant
+    # blind, that's exactly the mistake made twice already.
+    MAX_CHARGE_POWER_W = 4000.0
+    rg = default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=MAX_CHARGE_POWER_W)
+
+    rl_log, rr_log, temp_log, expected_log = [], [], [], []
+    friction_at_t0 = None
 
     for t in time_steps:
         fx, delta, vx, vy, wz, ay, ax, omega, brake = scenario_regen_thermal_derate(t)
@@ -619,7 +644,30 @@ def run_regen_thermal_derate():
         rr_log.append(t_out_c[3])
         temp_log.append(temp_rl)
 
-    return time_steps, np.array(rl_log), np.array(rr_log), np.array(temp_log)
+        # Ground-truth friction bound straight from the solver's own state
+        # -- the same value gp_tv_step just used this tick. No independent
+        # tire/aero reproduction needed for this half.
+        friction_rl = state.t_lb_rl_filt
+        friction_rr = state.t_lb_rr_filt
+        if friction_at_t0 is None:
+            friction_at_t0 = 0.5 * (friction_rl + friction_rr)
+
+        # Independent reproduction of ONLY the power+derate term (simple,
+        # config-derived; mirrors gp_power_limited_t_lb + the thermal
+        # sigmoid in gp_tv_step).
+        omega_safe = np.log1p(np.exp(np.clip(np.array(omega[2:4]) * 0.2032, -50, 50)))
+        t_power = np.clip(MAX_CHARGE_POWER_W / (omega_safe + 1e-3), 0.0, 2000.0)
+        derate = 1.0 - 1.0 / (1.0 + np.exp(-np.clip((np.array([temp_rl, temp_rr]) - 75.0) * 0.5, -20, 20)))
+        power_bound = t_power * derate
+
+        expected_log.append(min(friction_rl, power_bound[0]) + min(friction_rr, power_bound[1]))
+
+    print(f"  [Test 32 calibration] Friction ceiling/wheel @ t=0 (50C): {friction_at_t0:6.1f} Nm | "
+          f"Power ceiling/wheel @ 50C: {MAX_CHARGE_POWER_W/20.0:6.1f} Nm -- "
+          f"{'OK, friction binds first' if friction_at_t0 < MAX_CHARGE_POWER_W/20.0 else 'RETUNE MAX_CHARGE_POWER_W: power binds even when cool'}")
+
+    return (time_steps, np.array(rl_log), np.array(rr_log),
+            np.array(temp_log), np.array(expected_log))
 
 def generate_phase12_report(time_steps):
     """Phase 12: Regenerative Braking & Charge-Budget Management.
@@ -649,10 +697,19 @@ def generate_phase12_report(time_steps):
     ax.set_xlabel('Time (s)'); ax.set_ylabel('Torque (Nm)'); ax.legend(loc='best')
 
     # --- Panel 3: Thermal derate under regen ---
-    t_therm, rl_therm, rr_therm, temp_therm = run_regen_thermal_derate()
+    t_therm, rl_therm, rr_therm, temp_therm, expected_therm = run_regen_thermal_derate()
     ax = axs[1, 0]
-    ax.plot(t_therm, rl_therm, color='#0052cc', linewidth=2.5, label='RL Torque (Nm)')
-    ax.plot(t_therm, rr_therm, color='#e60000', linewidth=2.5, linestyle='--', label='RR Torque (Nm)')
+    # Individual wheels kept for reference (thin), but the meaningful
+    # apples-to-apples comparison is TOTAL delivered vs TOTAL expected
+    # ceiling -- expected_therm sums both wheels, so plotting it against
+    # a single wheel's curve was comparing a sum to a half, making a
+    # correctly-tracking result look offset by ~2x.
+    ax.plot(t_therm, rl_therm, color='#0052cc', linewidth=1.2, alpha=0.5, label='RL Torque (Nm)')
+    ax.plot(t_therm, rr_therm, color='#e60000', linewidth=1.2, alpha=0.5, linestyle='--', label='RR Torque (Nm)')
+    ax.plot(t_therm, np.abs(rl_therm) + np.abs(rr_therm), color='#0052cc', linewidth=2.5,
+            label='Total Delivered |RL|+|RR| (Nm)')
+    ax.plot(t_therm, expected_therm, color='#2ca02c', linewidth=2.0, linestyle=':',
+            label='Expected Power+Derate Ceiling, Total (Python cross-check)')
     ax2 = ax.twinx()
     ax2.plot(t_therm, temp_therm, color='#ff8800', linewidth=1.5, linestyle=':', label='Inverter Temp (C)')
     ax2.axhline(75.0, color='#ff0000', linewidth=1.0, linestyle='--', alpha=0.6)
@@ -679,7 +736,7 @@ def generate_phase12_report(time_steps):
     print(f"✅ Generado: {output_path}")
     plt.close()
 
-    return (rl_mix, rr_mix, rl_lock, rr_lock, t_therm, rl_therm, rr_therm, temp_therm,
+    return (rl_mix, rr_mix, rl_lock, rr_lock, t_therm, rl_therm, rr_therm, temp_therm, expected_therm,
             t_ramp, rl_ramp, rr_ramp, budget_ramp, total_mag_ramp)
 
 
@@ -704,7 +761,7 @@ def run_phase12_regen_analysis(time_steps):
     print("  PHASE 12: REGENERATIVE BRAKING & CHARGE-BUDGET MANAGEMENT")
     print("=" * 80)
 
-    (rl_mix, rr_mix, rl_lock, rr_lock, t_therm, rl_therm, rr_therm, temp_therm,
+    (rl_mix, rr_mix, rl_lock, rr_lock, t_therm, rl_therm, rr_therm, temp_therm, expected_therm,
      t_ramp, rl_ramp, rr_ramp, budget_ramp, total_mag_ramp) = generate_phase12_report(time_steps)
 
     # --- Guard 1: mixed-sign drive preservation (tight vs loose budget) ---
@@ -732,22 +789,26 @@ def run_phase12_regen_analysis(time_steps):
         f"— sign-blind rescale regression."
     )
 
-    # --- Guard 2: thermal derate must be monotonically non-increasing past 75C ---
-    hot_mask = temp_therm > 75.0
+    # --- Guard 2: thermal derate must actually TRACK the expected power+derate
+    # ceiling, not just fail to increase. Monotonicity-only would still pass
+    # a flat, friction-limited line that never responds to temperature. ---
     regen_mag = np.abs(rl_therm) + np.abs(rr_therm)
-    if np.any(hot_mask):
-        regen_in_hot_region = regen_mag[hot_mask]
-        derate_monotonic = (regen_in_hot_region[-1] <= regen_in_hot_region[0] + 5.0)
-        regen_at_75 = regen_in_hot_region[0]
-    else:
-        derate_monotonic = True
-        regen_at_75 = float('nan')
+    hot_mask = temp_therm > 78.0  # a couple degrees past the sigmoid's
+                                   # inflection to skip the transition's soft shoulder
+    tracking_err = np.abs(regen_mag[hot_mask] - expected_therm[hot_mask])
+    derate_tracks = np.mean(tracking_err) < 15.0  # Nm
 
-    color2 = "\033[92m" if derate_monotonic else "\033[91m"
-    status2 = "PASS" if derate_monotonic else "FAIL"
-    print(f"{color2}{status2:<18}\033[0m | 32: Thermal Derate Monotonicity          | "
-          f"@75C: {regen_at_75:6.1f} Nm -> @95C: {regen_mag[-1]:6.1f} Nm")
-    assert derate_monotonic, "Regen torque increased past the 75C derate threshold — thermal derate regression."
+    cool_mask = temp_therm <= 75.0
+    pct_drop = 100.0 * (1.0 - regen_mag[-1] / regen_mag[cool_mask][-1]) if np.any(cool_mask) else float('nan')
+    derate_meaningful = pct_drop > 50.0  # must actually collapse near 95C, not just dip
+
+    ok2 = derate_tracks and derate_meaningful
+    color2 = "\033[92m" if ok2 else "\033[91m"
+    status2 = "PASS" if ok2 else "FAIL"
+    print(f"{color2}{status2:<18}\033[0m | 32: Thermal Derate Ceiling Tracking       | "
+          f"Mean err vs expected: {np.mean(tracking_err):5.1f} Nm | Drop@95C: {pct_drop:4.1f}%")
+    assert derate_tracks, f"Delivered regen doesn't track expected power/derate ceiling (err {np.mean(tracking_err):.1f} Nm)."
+    assert derate_meaningful, f"Thermal derate only reduced regen by {pct_drop:.1f}% — power bound isn't actually binding."
 
     # --- Guard 3: budget-ramp must track the soft cap within the rate
     # limiter's own combined-wheel ceiling (no jump BEYOND that ceiling) ---
@@ -766,6 +827,27 @@ def run_phase12_regen_analysis(time_steps):
         f"({MAX_COMBINED_SLEW_NM_S:.1f} Nm/s) — genuine discontinuity, not just the rate limiter's ceiling."
     )
     assert not over_budget, "Delivered regen magnitude exceeded the live budget ceiling during the ramp."
+
+    # --- Guard 4: tracking fidelity, not just ceiling compliance. Guard 3
+    # only proves delivered <= budget, which a flat demand-starved line also
+    # satisfies — that's exactly how this shipped broken (fx=-250 never
+    # approached the budget). This proves delivered actually FOLLOWS budget
+    # once budget is plausibly binding. ---
+    tracking_region = budget_ramp < 250.0   # skip the narrow band near t=0
+                                              # where friction (~316 Nm), not
+                                              # budget, is still technically tighter
+    tracking_region[:20] = False             # skip ~100ms EMA filter settle
+    tracking_err33 = np.abs(total_mag_ramp[tracking_region] - budget_ramp[tracking_region])
+    tracks_budget = np.mean(tracking_err33) < 8.0  # Nm: soft-cap softness (4Nm) + rate-limiter lag
+
+    status4 = "PASS" if tracks_budget else "FAIL"
+    color4 = "\033[92m" if tracks_budget else "\033[91m"
+    print(f"{color4}{status4:<18}\033[0m | 33: Budget Ramp Tracking Fidelity         | "
+          f"Mean |delivered-budget|: {np.mean(tracking_err33):5.2f} Nm (limit 8.0)")
+    assert tracks_budget, (
+        f"Delivered magnitude doesn't track the budget ceiling (mean err "
+        f"{np.mean(tracking_err33):.2f} Nm) — demand-starved, not exercising the rescale."
+    )
 
     print("=" * 80)
     print(f"PHASE 12 SUMMARY | Mixed-sign drive delta: {drive_delta:.2f} Nm | "
