@@ -208,18 +208,19 @@ void gp_tv_step(
     float mz_rate_max = GP_TV_RATE_LIMIT * dt * GP_TRACK_R / (2.0f * GP_R_WHEEL);
 
     #if defined(GP_TV_USE_NMPC) && (GP_TV_USE_NMPC == 1)
-        // ── Branch 4: Embedded NMPC Predictive Yaw Controller ────────────
         // ~35ms tau LPF (fc ~ 4.5Hz) for robust 25Hz encoder jitter rejection
         float alpha_delta = GP_CLAMP(dt / (0.035f + dt), 0.0f, 1.0f);
         state->delta_nmpc_filt += alpha_delta * (delta - state->delta_nmpc_filt);
 
-        float states_nmpc[3] = { vx, vy, wz_corr };
-        gp_nmpc_step(states_nmpc, state->delta_nmpc_filt, wz_ref, dt, mz_max_dyn, mz_rate_max,
-                    mu_scale, &state->nmpc, &mz_req);
+        // Recompute wz_ref using the FILTERED steering angle so r_ref inside NMPC does not jitter
+        float wz_ref_nmpc = (vx_safe * state->delta_nmpc_filt) / (GP_WB + k_us * vx_safe * vx_safe);
+        wz_ref_nmpc = GP_CLAMP(wz_ref_nmpc, -wz_max, wz_max);
 
+        float states_nmpc[3] = { vx, vy, wz_corr };
+        gp_nmpc_step(states_nmpc, state->delta_nmpc_filt, wz_ref_nmpc, dt, mz_max_dyn, mz_rate_max,
+                    mu_scale, &state->nmpc, &mz_req);
         mz_req = GP_CLAMP(mz_req * os_gate * counter_steer_factor,
                         -mz_max_dyn, mz_max_dyn);
-
         state->nmpc.u_warm = mz_req;
     #else
         // ── Branch 3: Feedback PID + Beta Stabilization ─────────────────
