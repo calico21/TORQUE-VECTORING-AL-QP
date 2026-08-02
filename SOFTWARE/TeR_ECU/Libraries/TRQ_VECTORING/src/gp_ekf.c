@@ -39,10 +39,21 @@ void gp_ekf_predict(
     float vx_safe = GP_MAX(fabsf(vx), 0.5f);
     ekf->wz_corrected = wz_raw - ekf->x[GP_EKF_STATE_BW];
 
-    // --- Pure Kinematic Propagation ---
-    float vy_dot = ay_filt - (vx_safe * ekf->wz_corrected);
+    // --- REPLACE OLD PURE KINEMATIC LINE WITH THIS BLENDED BLOCK ---
+    float alpha_f = delta - atan2f(ekf->x[GP_EKF_STATE_VY] + ekf->wz_corrected * GP_LF, vx_safe);
+    float alpha_r =       - atan2f(ekf->x[GP_EKF_STATE_VY] - ekf->wz_corrected * GP_LR, vx_safe);
+    float fyf = GP_C_ALPHA_F * alpha_f;
+    float fyr = GP_C_ALPHA_R * alpha_r;
+    float vy_dot_model = (fyf + fyr) / GP_MASS - vx_safe * ekf->wz_corrected;
+
+    float vy_dot_kinematic = ay_filt - (vx_safe * ekf->wz_corrected);
+
+    float vy_dot = GP_EKF_MODEL_BLEND * vy_dot_model
+                 + (1.0f - GP_EKF_MODEL_BLEND) * vy_dot_kinematic;
+
     ekf->x[GP_EKF_STATE_VY] += vy_dot * dt;
     ekf->x[GP_EKF_STATE_VY] = GP_CLAMP(ekf->x[GP_EKF_STATE_VY], -6.0f, 6.0f);
+    // ────────────────────────────────────────────────────────────────
 
     // --- Fast 2x2 Analytical Covariance Prediction ---
     float f01 = dt * vx_safe;

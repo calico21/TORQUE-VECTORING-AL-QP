@@ -193,16 +193,18 @@ void gp_pack_telemetry(
     uint16_t qp_pack = (uint16_t)(qp_residual * 1000.0f);
     can_diag[0] = (qp_pack >> 8) & 0xFF; can_diag[1] = qp_pack & 0xFF;
 
-    // mz_sat_ratio, not alpha_qp: alpha_qp is a compile-time-derived constant
-    // in the production (closed-form) solve path and never changes at
-    // runtime — transmitting it as "Learning Step (Alpha)" implied a live
-    // adaptive quantity that doesn't exist here. mz_sat_ratio is the actual
-    // live anti-windup back-calculation signal (achieved-Δτ / requested-Δτ,
-    // clamped [0,1]) — the number that tells a race engineer whether the
-    // tires ran out of allocation room this lap.
     uint16_t mz_sat_pack = (uint16_t)(GP_CLAMP(state->mz_sat_ratio, 0.0f, 1.0f) * 10000.0f);
     can_diag[2] = (mz_sat_pack >> 8) & 0xFF; can_diag[3] = mz_sat_pack & 0xFF;
 
-    can_diag[4] = 0; can_diag[5] = 0;
-    can_diag[6] = 0; can_diag[7] = 0;
+    // === REPLACE OLD CAN_DIAG[4..7] ZERO-PADDING WITH THIS BLOCK ===
+    // --- FRAME 4 bytes 4-5: EKF vy estimate confidence (std dev) ---
+    uint16_t vy_std_pack = (uint16_t)(GP_CLAMP(state->ekf.vy_std, 0.0f, 3.0f) * 10000.0f);
+    can_diag[4] = (vy_std_pack >> 8) & 0xFF; can_diag[5] = vy_std_pack & 0xFF;
+
+    // --- FRAME 4 bytes 6-7: Friction-ellipse headroom ratio ---
+    float ub_sum   = state->t_ub_rl_filt + state->t_ub_rr_filt + 1e-3f;
+    float used_sum = fabsf(state->t_out_prev[GP_RL]) + fabsf(state->t_out_prev[GP_RR]);
+    float headroom = GP_CLAMP(1.0f - used_sum / ub_sum, 0.0f, 1.0f);
+    uint16_t headroom_pack = (uint16_t)(headroom * 10000.0f);
+    can_diag[6] = (headroom_pack >> 8) & 0xFF; can_diag[7] = headroom_pack & 0xFF;
 }

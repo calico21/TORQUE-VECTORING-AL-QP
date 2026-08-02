@@ -65,8 +65,6 @@ void gp_tv_init(tv_state_t* state) {
     state->t_ub_rl_filt = 0.0f;
     state->t_ub_rr_filt = 0.0f;
     
-    state->t_ub_rl_filt = 0.0f;
-    state->t_ub_rr_filt = 0.0f;
     state->t_lb_rl_filt = 0.0f;
     state->t_lb_rr_filt = 0.0f;
     state->delta_nmpc_filt = 0.0f; // <-- ADD THIS LINE
@@ -211,13 +209,13 @@ void gp_tv_step(
 
     #if defined(GP_TV_USE_NMPC) && (GP_TV_USE_NMPC == 1)
         // ── Branch 4: Embedded NMPC Predictive Yaw Controller ────────────
-        // ~15ms tau LPF to attenuate 25Hz encoder noise before horizon expansion
-        float alpha_delta = GP_CLAMP(dt / (0.015f + dt), 0.0f, 1.0f);
+        // ~35ms tau LPF (fc ~ 4.5Hz) for robust 25Hz encoder jitter rejection
+        float alpha_delta = GP_CLAMP(dt / (0.035f + dt), 0.0f, 1.0f);
         state->delta_nmpc_filt += alpha_delta * (delta - state->delta_nmpc_filt);
 
         float states_nmpc[3] = { vx, vy, wz_corr };
         gp_nmpc_step(states_nmpc, state->delta_nmpc_filt, wz_ref, dt, mz_max_dyn, mz_rate_max,
-                    &state->nmpc, &mz_req);
+                    mu_scale, &state->nmpc, &mz_req);
 
         mz_req = GP_CLAMP(mz_req * os_gate * counter_steer_factor,
                         -mz_max_dyn, mz_max_dyn);
