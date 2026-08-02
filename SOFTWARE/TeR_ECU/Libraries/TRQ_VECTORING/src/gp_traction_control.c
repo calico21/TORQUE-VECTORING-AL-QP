@@ -12,6 +12,7 @@ void gp_tc_init(tc_state_t* state) {
         state->kappa_prev[i] = 0.0f;
         state->fx_prev[i] = 0.0f;
         state->kappa_opt[i] = 0.12f;
+        state->omega_dot_kick_filt[i] = 0.0f;   // NEW
     }
     state->mu_surface[0] = GP_TC_MU_NOM;
     state->mu_surface[1] = GP_TC_MU_NOM;
@@ -177,18 +178,25 @@ void gp_tc_step(
         state->omega_prev_ema[i] = omega_ema;
         state->omega_last_raw[i] = omega[i];
         
-        float error_gate = gp_sigmoid(error * 50.0f); 
-        // Curb-strike / lock-up derivative kick, mirrored: the original term
-        // only caught a sudden POSITIVE omega spike (wheel launched off a
-        // curb -> wheelspin risk). Under regen the dangerous spike is a
-        // sudden NEGATIVE omega_dot (wheel snapping toward lock). sign_i
-        // selects which physical direction is being commanded this tick, so
-        // only the relevant branch can ever fire for a given wheel.
-        float deriv_kick_pos = 20.0f * gp_softplus((omega_dot - 250.0f) * 0.05f);
-        float deriv_kick_neg = 20.0f * gp_softplus((-omega_dot - 250.0f) * 0.05f);
+        // Dedicated slow filter for the deriv-kick trigger signal. alpha=0.04 at
+        // dt=0.005s gives an effective time constant of ~125ms, enough to reject
+        // an 8Hz noise cycle (period 125ms) down to a small fraction of its raw
+        // amplitude while still passing a genuine curb-strike or wheel-lock
+        // transient, which ramps and HOLDS for 100-150ms rather than
+        // oscillating and reversing every 60ms.
+        // PRIOR: alpha=0.08 (~60ms tau) passed ~20% of 8Hz noise amplitude
+        // through, enough to toggle the deriv-kick on alternating half-cycles
+        // and produce visible chatter in Variable Grip Launch (Test 26).
+        const float GP_TC_KICK_LPF_ALPHA = 0.04f;
+        state->omega_dot_kick_filt[i] += GP_TC_KICK_LPF_ALPHA * (omega_dot - state->omega_dot_kick_filt[i]);
+        float omega_dot_kick = state->omega_dot_kick_filt[i];
+
+        float error_gate = gp_sigmoid(error * 50.0f);
+        float deriv_kick_pos = 20.0f * gp_softplus((omega_dot_kick - 250.0f) * 0.05f);
+        float deriv_kick_neg = 20.0f * gp_softplus((-omega_dot_kick - 250.0f) * 0.05f);
         float deriv_kick = 2.0f * ((sign_i > 0.0f) ? deriv_kick_pos : deriv_kick_neg);
 
-        pi_out -= deriv_kick * error_gate; 
+        pi_out += deriv_kick * error_gate;
         
         float reduction = speed_gate * gp_softplus(pi_out * GP_TC_CLAMP_BETA) / GP_TC_CLAMP_BETA;
 

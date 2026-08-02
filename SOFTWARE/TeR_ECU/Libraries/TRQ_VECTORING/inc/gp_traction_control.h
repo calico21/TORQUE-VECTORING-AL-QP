@@ -38,6 +38,8 @@ typedef struct {
     float kappa_prev[4];   
     float fx_prev[4];      
     float kappa_opt[4];    
+    float omega_dot_kick_filt[4];   // NEW: dedicated slow filter for the deriv-kick trigger only
+
 } tc_state_t;
 
 void gp_tc_init(tc_state_t* state);

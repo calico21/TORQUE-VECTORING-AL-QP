@@ -55,8 +55,25 @@ float gp_bilinear_interp_4x4(const float table[16], float x_norm, float y_norm) 
            c11 * fx          * fy;
 }
 
-// Saturación suave magnitud-only
+// Saturación suave magnitud-only — smooth soft-minimum of (val, limit).
+//
+// PRIOR BUG: limit * tanh(val * alpha / limit) has derivative alpha at the
+// origin, not 1.0. With alpha = 0.25, EVERY value — even those far below
+// the cap — was multiplied by 0.25. The entire regen-budget enforcement
+// chain (pre-solve t_lb[] derivation AND post-solve rescale) depends on
+// gp_soft_cap(demand, budget, ...) ≈ demand when demand << budget, and
+// gp_soft_cap(demand, budget, ...) → budget when demand >> budget. The tanh
+// formulation gave gp_soft_cap(50, 300, 0.25) ≈ 12.7 instead of ≈ 50.
+//
+// FIX: val − (1/alpha) * softplus(alpha * (val − limit)).
+//   • At val << limit: softplus(negative_large) → 0 ⇒ result ≈ val   ✓
+//   • At val >> limit: softplus(positive_large) ≈ alpha*(val−limit)
+//                       ⇒ result ≈ val − (val−limit) = limit           ✓
+//   • alpha controls the transition sharpness near val ≈ limit.
+//     Larger alpha → sharper elbow, smaller alpha → wider blend region.
 float gp_soft_cap(float val, float limit, float alpha) {
     if (val <= 0.0f) return 0.0f;
-    return limit * tanhf(val * alpha / limit);
+    float alpha_safe = (alpha > 1e-6f) ? alpha : 1e-6f;
+    float x = alpha_safe * (val - limit);
+    return val - gp_softplus(x) / alpha_safe;
 }

@@ -13,19 +13,19 @@ gp_lib_nmpc = ctypes.CDLL('./gp_core_nmpc.so')
 
 class TCState(ctypes.Structure):
     _fields_ = [
-        ("pi_integral",     ctypes.c_float * 4),
-        ("kappa_filt",      ctypes.c_float * 4),
-        ("mu_surface",      ctypes.c_float * 2),
-        ("omega_last_raw",  ctypes.c_float * 4),
-        ("omega_prev_ema",  ctypes.c_float * 4),
-        ("rls_P",           ctypes.c_float * 4),
-        ("rls_theta",       ctypes.c_float * 4),
-        ("theta_prev",      ctypes.c_float * 4),
-        ("kappa_prev",      ctypes.c_float * 4),
-        ("fx_prev",         ctypes.c_float * 4),
-        ("kappa_opt",       ctypes.c_float * 4),
+        ("pi_integral",         ctypes.c_float * 4),
+        ("kappa_filt",          ctypes.c_float * 4),
+        ("mu_surface",          ctypes.c_float * 2),
+        ("omega_last_raw",      ctypes.c_float * 4),
+        ("omega_prev_ema",      ctypes.c_float * 4),
+        ("rls_P",               ctypes.c_float * 4),
+        ("rls_theta",           ctypes.c_float * 4),
+        ("theta_prev",          ctypes.c_float * 4),
+        ("kappa_prev",          ctypes.c_float * 4),
+        ("fx_prev",             ctypes.c_float * 4),
+        ("kappa_opt",           ctypes.c_float * 4),
+        ("omega_dot_kick_filt", ctypes.c_float * 4),   # NEW — matches tc_state_t
     ]
-
 class EkfState(ctypes.Structure):
     _fields_ = [
         ("x",            ctypes.c_float * 2),        # 2 states (vy, bw)
@@ -86,7 +86,7 @@ class TVState(ctypes.Structure):
     ]
 
 # Structural Safety Assertions
-assert ctypes.sizeof(TCState) == 42 * 4, f"TCState size mismatch"
+assert ctypes.sizeof(TCState) == 46 * 4, f"TCState size mismatch"
 
 def _bind(lib):
     lib.gp_tv_state_sizeof.restype = ctypes.c_size_t
