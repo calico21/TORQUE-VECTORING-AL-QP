@@ -77,9 +77,12 @@ class TVState(ctypes.Structure):
         ("ay_filt",        ctypes.c_float),
         ("t_ub_rl_filt",   ctypes.c_float),
         ("t_ub_rr_filt",   ctypes.c_float),
-        ("t_lb_rl_filt",   ctypes.c_float),
-        ("t_lb_rr_filt",   ctypes.c_float),
-        ("delta_nmpc_filt",ctypes.c_float),
+        ("t_lb_rl_filt",     ctypes.c_float),
+        ("t_lb_rr_filt",     ctypes.c_float),
+        ("delta_notch_x1",   ctypes.c_float),
+        ("delta_notch_x2",   ctypes.c_float),
+        ("delta_notch_y1",   ctypes.c_float),
+        ("delta_notch_y2",   ctypes.c_float),
     ]
 
 # Structural Safety Assertions
@@ -164,9 +167,10 @@ def default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=40000
     rg.max_charge_power_w = max_charge_power_w
     return rg
 
-def run_scenario(time_array, input_generator, non_idealities=None, regen_limits=None):
+def run_scenario(time_array, input_generator, non_idealities=None, regen_limits=None, lib=None):
+    lib = lib if lib is not None else gp_lib
     state = TVState()
-    gp_lib.gp_tv_init(ctypes.byref(state))
+    lib.gp_tv_init(ctypes.byref(state))
     state.tc.mu_surface[0] = 1.5
     state.tc.mu_surface[1] = 1.5
 
@@ -187,9 +191,9 @@ def run_scenario(time_array, input_generator, non_idealities=None, regen_limits=
         omega_c = (ctypes.c_float * 4)(*omega)
         t_out_c = (ctypes.c_float * 4)()
         
-        gp_lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, 
-                          omega_c, brake, 60.0, 60.0, 0.0, 0, ctypes.byref(rg),
-                          dt, ctypes.byref(state), t_out_c)
+        lib.gp_tv_step(fx, delta, vx, vy, wz, ay, ax, 
+                       omega_c, brake, 60.0, 60.0, 0.0, 0, ctypes.byref(rg),
+                       dt, ctypes.byref(state), t_out_c)
         
         t_out_processed = [t_out_c[0], t_out_c[1], t_out_c[2], t_out_c[3]]
         if non_idealities is not None:
@@ -398,13 +402,13 @@ def evaluate_test_kpis(time_steps, t_rl, t_rr, t_diff, beta_log, alpha_log, test
     reset_color = "\033[0m"
     print(f"{color}{status:<18} | {test_name:<40} | MaxBeta: {max_beta_deg:4.1f}° | α_qp: {avg_alpha_qp:4.2f} | RMS: {noise_rms:5.1f}{reset_color}")
 
-def generate_report(scenarios, titles, filename, super_title, time_steps):
+def generate_report(scenarios, titles, filename, super_title, time_steps, lib=None):
     fig, axs = plt.subplots(2, 2, figsize=(15, 9))
     fig.suptitle(super_title, fontsize=16, fontweight='bold')
     
     for ax, (scenario, title) in zip(axs.flat, zip(scenarios, titles)):
         # Unpack all 6 returned telemetry arrays
-        rl, rr, diff, beta, alpha_qp, mz_sat = run_scenario(time_steps, scenario)
+        rl, rr, diff, beta, alpha_qp, mz_sat = run_scenario(time_steps, scenario, lib=lib)
         
         # Pass telemetry into KPI evaluator
         evaluate_test_kpis(time_steps, rl, rr, diff, beta, alpha_qp, title)
@@ -1717,8 +1721,15 @@ if __name__ == "__main__":
     t13 = ['34: Chicane Preview (108 km/h)', '35: Step Steer Overshoot Damping', 
            '36: Emergency Lane Change Impulse', '37: 25Hz Encoder Noise Smoothing']
 
+    # Phase 13 is explicitly the NMPC (Branch 4) horizon suite — it must run
+    # against gp_lib_nmpc, not the gp_lib alias (which points at Branch 3
+    # AL-QP). Running it under AL-QP silently tested the wrong controller:
+    # Branch 3's raw PID differentiator has no mechanism analogous to NMPC's
+    # r_effort/r_slew quadratic penalties, so no amount of upstream delta
+    # filtering was ever going to reproduce NMPC's noise rejection here.
     generate_report(s13, t13, 'sanity_phase13_nmpc_horizon.png', 
-                    'Phase 13: Branch 4 Embedded NMPC Horizon Performance', time_steps)
+                    'Phase 13: Branch 4 Embedded NMPC Horizon Performance', time_steps,
+                    lib=gp_lib_nmpc)
 
     # ------------------ SECTION E.7: PHASE 14 — BRANCH 3 VS BRANCH 4 DOGFIGHT ------------------
     print("\nStarting Phase 14: Dogfight Comparisons (AL-QP Branch 3 vs. NMPC Branch 4)...")

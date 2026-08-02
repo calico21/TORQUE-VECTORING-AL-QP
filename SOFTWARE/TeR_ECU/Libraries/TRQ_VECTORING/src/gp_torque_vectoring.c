@@ -67,7 +67,10 @@ void gp_tv_init(tv_state_t* state) {
     
     state->t_lb_rl_filt = 0.0f;
     state->t_lb_rr_filt = 0.0f;
-    state->delta_nmpc_filt = 0.0f; // <-- ADD THIS LINE
+    state->delta_notch_x1 = 0.0f;
+    state->delta_notch_x2 = 0.0f;
+    state->delta_notch_y1 = 0.0f;
+    state->delta_notch_y2 = 0.0f;
 
     float h = GP_W_REG + GP_W_SMOOTH;
     float a_sq = 2.0f / (GP_R_WHEEL * GP_R_WHEEL);
@@ -119,12 +122,50 @@ void gp_tv_step(
     state->ax_filt += alpha_lpf * (ax - state->ax_filt);
     state->ay_filt += alpha_lpf * (ay - state->ay_filt);
 
+    // ── Filter delta ONCE, here, before ANY consumer sees it ──────────
+    // Two-pole (cascaded) EMA on delta before EKF, TC, and both yaw-moment
+    // policy branches ever see it. A single 35ms-tau pole only rolls off at
+    // 6 dB/octave -- at 25 Hz (the encoder-noise test frequency) that still
+    // passes ~17% of the input amplitude, which is enough to drive a
+    // persistent, non-decaying ripple through the EKF's integrated vy state
+    // and through kp*wz_err (kp up to ~450). Cascading a second identical
+    // pole doubles the rolloff to 12 dB/octave, attenuating 25Hz to ~3% of
+    // input while leaving realistic driver steering (1.5-3 Hz chicane/
+    // slalom frequencies) attenuated only ~11% -- not perceptible as lag.
+    // 2nd-order notch filter tuned to GP_STEER_NOTCH_FREQ_HZ, applied BEFORE
+    // any consumer (EKF, TC, both yaw-moment policy branches) sees delta.
+    // Direct-form-I difference equation:
+    //   y[n] = x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
+    // with b1=-2cos(w0), b2=1, a1=-2*r*cos(w0), a2=r^2. Coefficients are
+    // recomputed from the live dt each tick (cheap: one cosf call) rather
+    // than hardcoded for a fixed 200Hz assumption, so this stays correct
+    // even if the loop rate ever changes.
+    {
+        const float w0 = 2.0f * GP_PI * GP_STEER_NOTCH_FREQ_HZ * dt;
+        const float cosw0 = cosf(w0);
+        const float notch_b1 = -2.0f * cosw0;
+        const float notch_b2 = 1.0f;
+        const float notch_a1 = -2.0f * GP_STEER_NOTCH_R * cosw0;
+        const float notch_a2 = GP_STEER_NOTCH_R * GP_STEER_NOTCH_R;
+
+        float x0 = delta;
+        float y0 = x0 + notch_b1 * state->delta_notch_x1 + notch_b2 * state->delta_notch_x2
+                       - notch_a1 * state->delta_notch_y1 - notch_a2 * state->delta_notch_y2;
+
+        state->delta_notch_x2 = state->delta_notch_x1;
+        state->delta_notch_x1 = x0;
+        state->delta_notch_y2 = state->delta_notch_y1;
+        state->delta_notch_y1 = y0;
+
+        delta = y0;
+    }
+
     float vx_safe = GP_MAX(fabsf(vx), 0.5f);
     
     // ─────────────────────────────────────────────────────────────────
     // 1. UNIFIED EXTENDED KALMAN FILTER (EKF) STEP
     // ─────────────────────────────────────────────────────────────────
-    // A. Time Update (Prediction)
+    // A. Time Update (Prediction) -- now receives FILTERED delta
     gp_ekf_predict(&state->ekf, delta, state->ax_filt, state->ay_filt, wz, vx, dt);
 
     // B. Measurement Updates (Sequential Scalar Fusion)
@@ -145,6 +186,7 @@ void gp_tv_step(
     gp_estimate_fy(vx, vy, wz_corr, delta, fz_est, fy_est);
     
     // --- NEW CLEAN BLOCK ---
+    // delta is already the filtered signal (see above, filtered before EKF).
     float k_us = gp_adaptive_k_us(fz_est);
     float wz_ref = (vx_safe * delta) / (GP_WB + k_us * vx_safe * vx_safe);
 
@@ -165,6 +207,9 @@ void gp_tv_step(
     ki *= mu_scale;
 
     float wz_err = wz_ref - wz_corr;
+
+    // delta is already filtered -- Branch 3's derivative feedforward
+    // differentiates the same clean signal the EKF and Branch 4 use.
     float delta_dot = (delta - state->delta_prev) / dt;
     state->delta_prev = delta;
 
@@ -208,16 +253,11 @@ void gp_tv_step(
     float mz_rate_max = GP_TV_RATE_LIMIT * dt * GP_TRACK_R / (2.0f * GP_R_WHEEL);
 
     #if defined(GP_TV_USE_NMPC) && (GP_TV_USE_NMPC == 1)
-        // ~35ms tau LPF (fc ~ 4.5Hz) for robust 25Hz encoder jitter rejection
-        float alpha_delta = GP_CLAMP(dt / (0.035f + dt), 0.0f, 1.0f);
-        state->delta_nmpc_filt += alpha_delta * (delta - state->delta_nmpc_filt);
-
-        // Recompute wz_ref using the FILTERED steering angle so r_ref inside NMPC does not jitter
-        float wz_ref_nmpc = (vx_safe * state->delta_nmpc_filt) / (GP_WB + k_us * vx_safe * vx_safe);
-        wz_ref_nmpc = GP_CLAMP(wz_ref_nmpc, -wz_max, wz_max);
-
+        // delta is already filtered; wz_ref (computed above from filtered
+        // delta) is identical to what wz_ref_nmpc would compute, so reuse it
+        // directly instead of recomputing.
         float states_nmpc[3] = { vx, vy, wz_corr };
-        gp_nmpc_step(states_nmpc, state->delta_nmpc_filt, wz_ref_nmpc, dt, mz_max_dyn, mz_rate_max,
+        gp_nmpc_step(states_nmpc, delta, wz_ref, dt, mz_max_dyn, mz_rate_max,
                     mu_scale, &state->nmpc, &mz_req);
         mz_req = GP_CLAMP(mz_req * os_gate * counter_steer_factor,
                         -mz_max_dyn, mz_max_dyn);

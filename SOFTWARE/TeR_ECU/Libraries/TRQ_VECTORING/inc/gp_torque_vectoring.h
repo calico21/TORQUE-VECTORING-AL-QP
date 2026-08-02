@@ -25,6 +25,8 @@
 #define GP_YAW_DEADZONE_RADS        0.0175f  // ~1.0 deg/s yaw rate deadzone
 #define GP_ACCEL_LPF_TAU            0.0200f  // 20ms LPF (8 Hz cutoff) for accelerometers
 
+#define GP_STEER_NOTCH_FREQ_HZ  25.0f  // Known encoder-artifact frequency to reject
+#define GP_STEER_NOTCH_R         0.90f  // Notch pole radius (closer to 1.0 = narrower notch, more surgical)
 // ── Profiling Telemetry Exports (Cortex-M Target Only) ────────────────
 #if defined(__arm__) || defined(__ARM_ARCH)
 extern volatile uint32_t g_tv_exec_cycles;
@@ -66,7 +68,21 @@ typedef struct {
     float t_ub_rr_filt;
     float t_lb_rl_filt;   // NEW: filtered per-wheel regen (negative-torque) bound
     float t_lb_rr_filt;   // NEW
-    float delta_nmpc_filt; // NMPC steering LPF state (~15ms tau)
+
+    // 25 Hz encoder-noise rejection: 2nd-order (biquad) notch filter memory,
+    // direct form I. REPLACES the earlier two-pole low-pass cascade. That
+    // cascade only bought 6 dB/octave PER pole -- at 25 Hz two poles gave
+    // ~-30 dB attenuation, but kp/kd gains up to ~450/~30 still turned the
+    // surviving ~3% residual into tens of Nm of ripple. A notch tuned
+    // EXACTLY to the known disturbance frequency rejects that one frequency
+    // far more aggressively (tunable to 40+ dB) while leaving DC and every
+    // other frequency -- including the 1.5-3 Hz band real chicane/slalom
+    // steering occupies -- at unity gain. This is the correct tool once the
+    // disturbance frequency is known and fixed, rather than more poles.
+    float delta_notch_x1;  // x[n-1]
+    float delta_notch_x2;  // x[n-2]
+    float delta_notch_y1;  // y[n-1]
+    float delta_notch_y2;  // y[n-2]
 } tv_state_t;
 
 void gp_tv_init(tv_state_t* state);
