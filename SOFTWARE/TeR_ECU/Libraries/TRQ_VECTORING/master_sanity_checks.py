@@ -49,9 +49,10 @@ class GPRegenLimits(ctypes.Structure):
 
 class NMPCState(ctypes.Structure):
     _fields_ = [
-        ("x_pred", (ctypes.c_float * 2) * 11),  # N=10 -> N+1 = 11 prediction steps
+        ("x_pred", (ctypes.c_float * 2) * 9),   # N=8 -> N+1=9 (was 11 for N=10)
         ("A_d", (ctypes.c_float * 2) * 2),
         ("B_d", (ctypes.c_float * 1) * 2),
+        ("u_seq", ctypes.c_float * 8),           # NEW: RTI warm-start sequence buffer
         ("u_warm", ctypes.c_float),
         ("q_yaw", ctypes.c_float),
         ("r_effort", ctypes.c_float),

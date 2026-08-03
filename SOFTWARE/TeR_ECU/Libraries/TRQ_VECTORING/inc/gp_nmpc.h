@@ -4,27 +4,33 @@
 #include "gp_params.h"
 #include "gp_vehicle_model.h"
 
-#define GP_NMPC_N          10
+#define GP_NMPC_N          8      // Condensed SQP-RTI horizon (was 10, control-hold). N=8 per spec.
 #define GP_NMPC_DT         0.010f
 #define GP_NMPC_STATES     2
 #define GP_NMPC_INPUTS     1
 
-// Control-horizon-1 batch QP: single decision variable (u_0) held over the
-// GP_NMPC_N-step prediction. A_d/B_d/u_warm are single-stage, NOT
-// per-horizon-step — x_pred is kept per-step only for telemetry.
+// Gauss-Seidel sweeps/tick. RTI means ONE linearization + a warm-started
+// solve per sample, not iterate-to-convergence — the shift from the prior
+// tick's sequence carries the load, so this stays small and fixed
+// (deterministic O(1), no early-exit branch to avoid timing jitter).
+#define GP_NMPC_QP_ITER    6
+
+// Full condensed control-SEQUENCE NMPC state. The prior struct held a
+// single u_warm scalar (control-hold across the horizon); this carries the
+// entire planned sequence so the RTI scheme can shift-and-warm-start it
+// every tick instead of resolving from a cold start.
 typedef struct {
-    float x_pred[GP_NMPC_N + 1][GP_NMPC_STATES];
+    float x_pred[GP_NMPC_N + 1][GP_NMPC_STATES]; // Predicted traj: telemetry + next-tick frozen-gate source
     float A_d[GP_NMPC_STATES][GP_NMPC_STATES];
     float B_d[GP_NMPC_STATES][GP_NMPC_INPUTS];
-    float u_warm;
-    // Pesos de costo reconfigurables en runtime:
+    float u_seq[GP_NMPC_N];                       // Planned Mz sequence — RTI warm-start buffer
+    float u_warm;                                 // Last EXTERNALLY applied Mz (gated by caller, unchanged semantics)
     float q_yaw;
     float r_effort;
     float r_slew;
 } gp_nmpc_state_t;
 
 void gp_nmpc_set_weights(gp_nmpc_state_t *state, float q_yaw, float r_effort, float r_slew);
-
 void gp_nmpc_init(gp_nmpc_state_t *state);
 
 void gp_nmpc_compute_jacobians(float v_x, float mu_scale,
