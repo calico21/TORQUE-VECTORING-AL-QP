@@ -4,13 +4,36 @@
 
 ### Tecnun eRacing · Formula Student Electric Monoplaza
 
-![Platform](https://img.shields.io/badge/MCU-STM32F405VGTx%20%40%20168MHz-03234B?style=for-the-badge&logo=stmicroelectronics)
-![RTOS](https://img.shields.io/badge/RTOS-FreeRTOS%20(CMSIS--OS2)-4B8BBE?style=for-the-badge)
+<img src="https://github.com/user-attachments/assets/19eb67bc-d25d-4a5b-bf23-312f95558412" width="720" alt="TeR_ECU board"/>
+
+<br/>
+
+![Platform](https://img.shields.io/badge/MCU-STM32F405VGTx%20%40%20168MHz-03234B?style=for-the-badge&logo=stmicroelectronics&logoColor=white)
+![RTOS](https://img.shields.io/badge/RTOS-FreeRTOS%20(CMSIS--OS2)-4B8BBE?style=for-the-badge&logo=freertos&logoColor=white)
 ![Loop](https://img.shields.io/badge/Control%20Loop-Up%20to%20200Hz-orange?style=for-the-badge)
 ![Branches](https://img.shields.io/badge/TV%20Branches-4-purple?style=for-the-badge)
 ![Language](https://img.shields.io/badge/C-98%25-555555?style=for-the-badge&logo=c)
+![Python](https://img.shields.io/badge/SIL%20Harness-Python%20%2F%20ctypes-3776AB?style=for-the-badge&logo=python&logoColor=white)
+
+![Status](https://img.shields.io/badge/status-active%20development-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/SIL%20scenarios-40%2B-blue?style=flat-square)
+![Monte Carlo](https://img.shields.io/badge/Monte%20Carlo%20trials-25--30%2Fscenario-blueviolet?style=flat-square)
+![License](https://img.shields.io/badge/license-Team%20Internal-lightgrey?style=flat-square)
+![Team](https://img.shields.io/badge/Team-Tecnun%20eRacing-e94560?style=flat-square)
 
 **One vehicle. One ECU. Four generations of torque-vectoring control philosophy — living side by side as parallel branches, each a complete, buildable, independently-validated control stack.**
+
+</div>
+
+---
+
+## 🧾 At a Glance
+
+<div align="center">
+
+| 🧠 Compute | 🔁 Control Rate | 🎯 Branches | 🧪 SIL Scenarios | 🌡️ Thermal-Aware | 🔋 Regen-Aware |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| Cortex-M4 @ 168 MHz | up to 200 Hz | 4 | 40+ | ✅ (Branch 3/4) | ✅ (Branch 3/4) |
 
 </div>
 
@@ -28,9 +51,12 @@
    - [🟣 Branch 3 — `feat-v3-al-qp`](#-branch-3--feat-v3-al-qp)
    - [🔴 Branch 4 — `feat-v4-embedded-nmpc-godmode`](#-branch-4--feat-v4-embedded-nmpc-godmode)
 6. [Side-by-Side Comparison](#-side-by-side-comparison)
-7. [Validation Philosophy — SIL Testing](#-validation-philosophy--sil-testing)
-8. [How to Check Out a Branch](#-how-to-check-out-a-branch)
-9. [Glossary](#-glossary)
+7. [Complexity vs Performance Map](#-complexity-vs-performance-map)
+8. [Validation Philosophy — SIL Testing](#-validation-philosophy--sil-testing)
+9. [Repository Layout](#-repository-layout)
+10. [How to Check Out a Branch](#-how-to-check-out-a-branch)
+11. [Roadmap](#-roadmap)
+12. [Glossary](#-glossary)
 
 ---
 
@@ -56,18 +82,22 @@ flowchart LR
     style V4 fill:#8a1c2e,color:#fff
 ```
 
-Why keep four branches instead of picking one winner? Because on a Formula Student car, **complexity is a liability under a competition deadline**. Branch 1 is the "always works, tow it home" fallback. Branch 3 is the current race-day default. Branch 4 is the research frontier. Having all three (plus Branch 2 as the historical stepping stone) checked out and buildable at any time means the team can *downgrade in five minutes* the night before a dynamic event if something in the advanced stack misbehaves.
+> 💡 **Why keep four branches instead of picking one winner?** Because on a Formula Student car, **complexity is a liability under a competition deadline**. Branch 1 is the "always works, tow it home" fallback. Branch 3 is the current race-day default. Branch 4 is the research frontier. Having all of them checked out and buildable at any time means the team can *downgrade in five minutes* the night before a dynamic event if something in the advanced stack misbehaves.
 
 ---
 
 ## 🗂️ Repository Map — Branch Directory
 
+<div align="center">
+
 | Branch | Nickname | Core Idea | Status |
-|---|---|---|---|
-| [`feat-v1-simple-effective`](#-branch-1--feat-v1-simple-effective) | **The Baseline** | Lookup-table torque + PI/feedforward yaw correction | ✅ Stable, always buildable |
-| [`feat-v2-intermediate`](#-branch-2--feat-v2-intermediate) | **The Bridge** | 2-state EKF + Sliding Mode Control with β-suppression | ✅ Stable |
-| [`feat-v3-al-qp`](#-branch-3--feat-v3-al-qp) | **The Workhorse** | Deterministic 16-iteration Augmented Lagrangian QP allocator | 🏆 Current race default |
-| [`feat-v4-embedded-nmpc-godmode`](#-branch-4--feat-v4-embedded-nmpc-godmode) | **The Frontier** | Condensed real-time-iteration NMPC over an 8-step horizon | 🧪 Active R&D |
+|---|---|---|:---:|
+| [`feat-v1-simple-effective`](#-branch-1--feat-v1-simple-effective) | 🟢 **The Baseline** | Lookup-table torque + PI/feedforward yaw correction | ![](https://img.shields.io/badge/-stable-brightgreen) |
+| [`feat-v2-intermediate`](#-branch-2--feat-v2-intermediate) | 🔵 **The Bridge** | 2-state EKF + Sliding Mode Control with β-suppression | ![](https://img.shields.io/badge/-stable-brightgreen) |
+| [`feat-v3-al-qp`](#-branch-3--feat-v3-al-qp) | 🟣 **The Workhorse** | Deterministic 16-iteration Augmented Lagrangian QP allocator | ![](https://img.shields.io/badge/-race--default-gold) |
+| [`feat-v4-embedded-nmpc-godmode`](#-branch-4--feat-v4-embedded-nmpc-godmode) | 🔴 **The Frontier** | Condensed real-time-iteration NMPC over an 8-step horizon | ![](https://img.shields.io/badge/-active%20R%26D-red) |
+
+</div>
 
 ```bash
 # Fetch every branch locally
@@ -99,7 +129,28 @@ Every branch runs on the same physical board and the same real-time operating sy
 
 </div>
 
-![TeR_ECU board](https://github.com/user-attachments/assets/19eb67bc-d25d-4a5b-bf23-312f95558412)
+```mermaid
+mindmap
+  root((TeR_ECU))
+    MCU
+      STM32F405VGTx
+      Cortex-M4 @ 168MHz
+      Hardware FPU
+    Comms
+      CAN 2.0 x2
+      USB CDC
+    Sensing
+      ASM330LHH IMU
+      LIS3MDL Magnetometer
+      NEO-M9N GPS
+    IO
+      4x Digital In 0-24V
+      4x Digital Out 0-24V
+      4x PWM 3.3V
+      4x Analog In 0-3.3V
+    Lighting
+      2x WS2812 SPI channels
+```
 
 ---
 
@@ -154,7 +205,23 @@ flowchart LR
 
 This 5-stage function-pointer pipeline (`trqPipeline_t DriveConfig`) is what lets the team hot-swap Branch 1's `lineal()` for Branch 3's `gp_mode_intermediate()` by changing a single CAN-configurable enum (`TeR.config.driving_mode`) — no other file in the firmware needs to know which generation is active.
 
-Also common to every branch: driverless-mode (DV) state machine (`AS_OFF → AS_READY → AS_DRIVING → AS_EMERGENCY/FINISHED`, FSG-rule-compliant), EEPROM-backed configuration system, GPS/IMU sensor tasks, and the WS2812 LightShow driver.
+<details>
+<summary>🚦 Driverless (DV) state machine — click to expand</summary>
+
+```mermaid
+stateDiagram-v2
+    [*] --> AS_OFF
+    AS_OFF --> AS_READY: ASMS on + mission selected + brake held
+    AS_READY --> AS_DRIVING: R2D command
+    AS_DRIVING --> AS_EMERGENCY: EBS / redundancy trip
+    AS_DRIVING --> AS_FINISHED: mission finished + stopped
+    AS_EMERGENCY --> AS_FINISHED: stopped + RES e-stop clear
+    AS_FINISHED --> [*]
+```
+
+Also common to every branch: EEPROM-backed configuration system, GPS/IMU sensor tasks, and the WS2812 LightShow driver.
+
+</details>
 
 ---
 
@@ -162,7 +229,9 @@ Also common to every branch: driverless-mode (DV) state machine (`AS_OFF → AS_
 
 ### 🟢 Branch 1 — `feat-v1-simple-effective`
 
-> *"Il most reliable Nm on the grid."* — the fallback that never fails a scrutineering torque-limit check.
+![Complexity](https://img.shields.io/badge/complexity-⭐-brightgreen) ![Role](https://img.shields.io/badge/role-emergency%20fallback-informational)
+
+> *"The most reliable Nm on the grid."* — the fallback that never fails a scrutineering torque-limit check.
 
 **Philosophy:** a fully deterministic, human-tunable, open-loop-friendly controller with **zero external dependencies** beyond a 2×11×11 lookup table and one PI+feedforward loop. If every advanced branch is unavailable on race morning, this is what goes on track.
 
@@ -194,6 +263,8 @@ flowchart TD
 
 ### 🔵 Branch 2 — `feat-v2-intermediate`
 
+![Complexity](https://img.shields.io/badge/complexity-⭐⭐-yellowgreen) ![Role](https://img.shields.io/badge/role-legacy%20%2F%20teaching-informational)
+
 > *"Give the controller eyes."* — the first branch to estimate vehicle state instead of assuming it.
 
 **Philosophy:** keep Branch 1's LUT-based longitudinal torque shaping, but replace the open-loop yaw reference and PI loop with a genuine **state observer** and a **nonlinear, chattering-resistant controller**. This is the bridge generation between "tuned gains" and "solved optimization problem."
@@ -201,7 +272,7 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph EKF["2-State EKF (vy, bias bz)"]
-        Pred["Predict:\nvẏ = ay − vx·(ψ̇−bz)"] --> Upd1["Update: pseudo-kinematic\nvy_ss from bicycle model"]
+        Pred["Predict:\nvẏ = ay − vx·(ψ̇−bz)"] --> Upd1["Update: pseudo-kinematic\nvy_ss from bicycle model"]
         Upd1 --> Upd2["Update: GPS v_y\n(when fix valid)"]
         Upd2 --> Beta["β = atan2(vy, vx)"]
     end
@@ -229,6 +300,8 @@ flowchart TD
 ---
 
 ### 🟣 Branch 3 — `feat-v3-al-qp`
+
+![Complexity](https://img.shields.io/badge/complexity-⭐⭐⭐⭐-orange) ![Role](https://img.shields.io/badge/role-🏆%20race--day%20default-gold)
 
 > *"Stop tuning gains. Solve the optimization problem."* — the current race-day controller.
 
@@ -266,6 +339,30 @@ flowchart TD
     TC3 -->|"softplus magnitude gate,\nnever amplifies, sign-preserving"| OUT["Final per-wheel torque"]
 ```
 
+<details>
+<summary>⏱️ Per-tick sequence (5 ms budget) — click to expand</summary>
+
+```mermaid
+sequenceDiagram
+    participant Sensors
+    participant EKF as EKF (vy, bz)
+    participant Bounds as Friction/Power Bounds
+    participant QP as AL-QP Solver
+    participant TC as Traction Control
+    participant Inv as Inverters
+
+    Sensors->>EKF: IMU, GPS, steering, wheel speed
+    EKF->>Bounds: vy, wz_corrected, beta
+    Bounds->>QP: t_lb[], t_ub[] (friction+power+thermal+regen)
+    QP->>QP: 16 fixed iterations (or closed-form KKT)
+    QP->>TC: T_RL, T_RR (pre-TC), mz_sat_ratio
+    TC->>TC: RLS Pacejka gradient + kappa target
+    TC->>Inv: Final magnitude-gated torque
+    Note over Sensors,Inv: Entire loop bounded to 5 ms (200 Hz)
+```
+
+</details>
+
 **Why this is the workhorse:**
 - **Deterministic O(1) solve** — the AL-QP core runs a *fixed* 16-iteration loop (`GP_QP_ITER`); a competition ECU cannot tolerate a solver whose convergence time depends on the input, and this one's timing never jitters.
 - **Closed-form KKT alternative available** — `gp_qp_solve_rwd_closedform()` replaces the 16-iteration numerical loop with an *exact*, algebraically-derived equality-constrained solution, blended across four bounded candidate solutions (interior / RL-saturated / RR-saturated / both-saturated) via smooth sigmoid activation weights instead of a hard hysteresis flag — eliminating the 25–90 Hz chattering cluster that a discrete Schmitt-trigger branch used to introduce near the friction-ellipse boundary.
@@ -279,6 +376,8 @@ flowchart TD
 ---
 
 ### 🔴 Branch 4 — `feat-v4-embedded-nmpc-godmode`
+
+![Complexity](https://img.shields.io/badge/complexity-⭐⭐⭐⭐⭐-red) ![Role](https://img.shields.io/badge/role-research%20%2F%20next--gen-critical)
 
 > *"Don't just react to the yaw error — plan the next 40 ms of it."*
 
@@ -327,6 +426,8 @@ flowchart TD
 
 ## 📊 Side-by-Side Comparison
 
+<div align="center">
+
 | Dimension | 🟢 V1 Simple | 🔵 V2 Intermediate | 🟣 V3 AL-QP | 🔴 V4 NMPC |
 |---|---|---|---|---|
 | **Yaw controller** | PI + turn-in FF | Sliding Mode Control | AL-QP allocation (feedback+FF policy) | Condensed RTI-NMPC (8-step preview) |
@@ -337,8 +438,40 @@ flowchart TD
 | **Solve determinism** | Trivial (closed-form) | Trivial (closed-form) | Fixed 16-iter / closed-form KKT — O(1) | Fixed 6-sweep Gauss-Seidel — O(1) |
 | **Preview horizon** | None (instantaneous) | None (instantaneous) | None (instantaneous) | ✅ 8 steps (~40–80 ms) |
 | **Thermal/power awareness** | ❌ | ❌ | ✅ Live sigmoid derating | ✅ (shared bounds) |
-| **Complexity to debug on-site** | ⭐ Trivial | ⭐⭐ Low | ⭐⭐⭐⭐ High | ⭐⭐⭐⭐⭐ Very High |
+| **Complexity to debug on-site** | ⭐ | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
 | **Recommended role** | Emergency fallback | Legacy / teaching reference | 🏆 Race-day default | Research / next-gen candidate |
+
+</div>
+
+---
+
+## 🗺️ Complexity vs Performance Map
+
+```mermaid
+quadrantChart
+    title Complexity vs Expected Performance Ceiling
+    x-axis Low Complexity --> High Complexity
+    y-axis Low Performance Ceiling --> High Performance Ceiling
+    quadrant-1 Frontier
+    quadrant-2 Overkill Risk
+    quadrant-3 Safe Baseline
+    quadrant-4 Sweet Spot
+    "V1 Simple": [0.12, 0.30]
+    "V2 Intermediate": [0.35, 0.48]
+    "V3 AL-QP": [0.70, 0.82]
+    "V4 NMPC": [0.92, 0.90]
+```
+
+```mermaid
+pie showData
+    title SIL Scenario Distribution (Branch 3 master_sanity_checks.py)
+    "Core physics & edge cases" : 8
+    "Performance/robustness dogfights" : 16
+    "Envelope expansion / race-pace" : 8
+    "Regen phase (Phase 12)" : 4
+    "NMPC horizon suite" : 4
+    "Dogfight + closed-loop + sweep" : 6
+```
 
 ---
 
@@ -356,10 +489,38 @@ flowchart LR
     PASS -->|assert| CI["Regression guard —\nbreaks the build"]
 ```
 
-Common guard rails across every harness:
-- **Struct-layout assertions** — `assert ctypes.sizeof(PyStruct) == lib.sizeof_fn()` at import time, so a C struct field added without updating the Python mirror fails loudly instead of segfaulting silently.
-- **Hard failure gates** — `T > 600 Nm` (motor limit exceeded) or excessive slew-rate RMS (actuator/hardware wear proxy) always fail the run, regardless of which branch is being tested.
-- **Monte Carlo robustness sweeps** — sensor noise (Gaussian, quantized), transport latency (1-tick FIFO delay), and CAN-glitch injection run each critical scenario 25–30 times per branch to certify stability isn't a lucky seed.
+<div align="center">
+
+| Guard Rail | What It Catches |
+|---|---|
+| 🧱 **Struct-layout assertions** | `assert ctypes.sizeof(PyStruct) == lib.sizeof_fn()` at import time — a C struct field added without updating the Python mirror fails loudly instead of segfaulting silently |
+| 🚫 **Hard failure gates** | `T > 600 Nm` (motor limit exceeded) or excessive slew-rate RMS (actuator/hardware wear proxy) always fail the run, regardless of branch |
+| 🎲 **Monte Carlo robustness sweeps** | Sensor noise (Gaussian, quantized), transport latency (1-tick FIFO delay), CAN-glitch injection — 25–30 trials per critical scenario |
+| 📈 **Frequency-domain checks** | High-frequency FFT energy + zero-crossing rate catch chattering that a time-domain RMS check alone would miss |
+
+</div>
+
+---
+
+## 🗃️ Repository Layout
+
+```text
+TeR_ECU/
+├── SOFTWARE/
+│   ├── TeR_ECU/
+│   │   ├── TeR/
+│   │   │   ├── Inc/            # Vehicle firmware headers (CAN, config, state machine, safety)
+│   │   │   └── Src/            # Vehicle firmware sources (shared across ALL branches)
+│   │   └── Libraries/
+│   │       └── TRQ_VECTORING/  # ★ branch-specific torque-vectoring core lives here ★
+│   │           ├── inc/        # gp_*.h / v1_*.h / v2_*.h control-law headers
+│   │           ├── src/        # gp_*.c / v1_*.c / v2_*.c control-law sources
+│   │           ├── master_sanity_checks.py   # Branch 3/4 SIL battery (17 phases)
+│   │           ├── v1_sanity_checks.py       # Branch 1 SIL battery
+│   │           ├── v2_sanity_checks.py       # Branch 2 SIL battery
+│   │           └── compare_v1_v2.py          # Head-to-head V1 vs V2 benchmark
+└── README.md                    # 🏠 you are here
+```
 
 ---
 
@@ -384,9 +545,52 @@ git checkout feat-v4-embedded-nmpc-godmode
 
 Each branch is independently buildable for the STM32F405 target via STM32CubeIDE, and each `Libraries/TRQ_VECTORING/` directory is independently buildable as a host-side `.so` for its SIL harness via the `gcc -shared -fPIC -O2 ...` command documented at the top of that branch's `*_sanity_checks.py`.
 
+<details>
+<summary>🛠️ Quick-build cheatsheet (SIL harness only) — click to expand</summary>
+
+```bash
+# Branch 1
+gcc -shared -fPIC -O2 -o v1_core.so src/v1_vehicle_dynamics.c -Iinc -I../../TeR/Inc -lm
+python3 v1_sanity_checks.py
+
+# Branch 2
+gcc -shared -fPIC -O2 -o v2_core.so src/v2_vehicle_dynamics.c -Iinc -I../../TeR/Inc -lm
+python3 v2_sanity_checks.py
+
+# Branch 3 / 4 (AL-QP + NMPC share one harness)
+gcc -shared -fPIC -O2 -o gp_core_alqp.so src/gp_*.c -Iinc -I../../TeR/Inc -lm
+gcc -shared -fPIC -O2 -DGP_TV_USE_NMPC=1 -o gp_core_nmpc.so src/gp_*.c -Iinc -I../../TeR/Inc -lm
+python3 master_sanity_checks.py
+```
+
+</details>
+
+---
+
+## 🧭 Roadmap
+
+```mermaid
+timeline
+    title Torque-Vectoring Evolution
+    2024 : Branch 1 — LUT + PI/FF baseline
+    2025 : Branch 2 — EKF + Sliding Mode
+    2025-26 : Branch 3 — AL-QP allocator, regen-aware, closed-form KKT
+    2026 : Branch 4 — Embedded NMPC (RTI), Branch 3 vs 4 dogfight
+```
+
+- [x] Deterministic AL-QP allocator with closed-form KKT fallback
+- [x] Regenerative-braking-aware friction/power bounds with proportional budget rescale
+- [x] Predictive RLS traction control (drive + regen unified)
+- [x] Embedded RTI-NMPC yaw policy (8-step horizon)
+- [ ] Live AMS pack-voltage decode (replace `GP_NOMINAL_PACK_VOLTAGE_V` placeholder)
+- [ ] Extend NMPC horizon evaluation to full Monte Carlo battery
+- [ ] Four-wheel-drive extension path (`trqMap_t` already has room to grow)
+
 ---
 
 ## 📖 Glossary
+
+<div align="center">
 
 | Term | Meaning |
 |---|---|
@@ -404,6 +608,8 @@ Each branch is independently buildable for the STM32F405 target via STM32CubeIDE
 | **DV / AS** | Driverless / Autonomous System — the FSG-rules-compliant autonomous operation state machine |
 | **SIL** | Software-in-the-Loop — testing the exact compiled embedded binary from a host-side Python harness |
 
+</div>
+
 ---
 
 <div align="center">
@@ -411,5 +617,7 @@ Each branch is independently buildable for the STM32F405 target via STM32CubeIDE
 **Tecnun eRacing** · Formula Student
 
 *Four branches. One car. Pick the complexity you can defend at scrutineering.*
+
+![Made with](https://img.shields.io/badge/made%20with-%E2%9D%A4%EF%B8%8F%20and%20lots%20of%20torque-e94560?style=for-the-badge)
 
 </div>
