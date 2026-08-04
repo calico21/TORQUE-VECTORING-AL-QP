@@ -1,17 +1,29 @@
-# TeR_ECU
-TeR Electronic Control Unit, which handles the behaivour of the cars dynamic system while gathering all the sensor and data neccesary for operation through its inputs and communication buses.
+# Torque Vectoring eRacing — Branch Directory Hub
 
+Welcome to the central repository for the Torque Vectoring control logic developed for the Formula Student electric monoplaza. 
 
-## Features
-- STM32F405VGTx Microcontroller (Cortex™-M4 Core@168mHz with FPU)
-- USB For Diagnosis Operation
-- 2x CAN 2.0 For its communication with the Powertrain CAN and main sensors CAN
-- NEO M9N GPS modules from u-blox, for determining cars position (Posibility to drive an active Antenna)
-- 9DOF IMU consisting in Accelerometer, Gyroscope and Magnetometer for accurate posting and torque algorithms
-- 4 Digital Inputs (0V-24V Range)
-- 4 PWM Outputs(3.3V), for servo control, including actuators
-- 4 Analog Inputs (0V-3.3V) Possibility of configurable Input divider
-- 4 Digital Outputs(0V-24V) High side mosfet drivers
-- 2 WS2812 RGB Led Channels using integrated SPI for FS-Spain LightShow Acceleration
-![image](https://github.com/user-attachments/assets/19eb67bc-d25d-4a5b-bf23-312f95558412)
+This `main` branch serves as the project lobby. The actual implementations, telemetry integration, and control algorithms are isolated in dedicated feature branches detailed below.
 
+---
+
+## 🌿 Branch Directory
+
+| Branch | Description & Features |
+| :--- | :--- |
+| **`feat-v1-simple-effective`** | **Baseline Rule-Based Controller**<br>- Simple open-loop/closed-loop yaw moment allocation.<br>- Lightweight lookup-table-based torque distribution.<br>- Initial documentation and reference literature included. |
+| **`feat-v2-intermediate`** | **State-Feedback & Dynamic Slip Control**<br>- Dynamic yaw rate reference generator.<br>- Closed-loop PI/PID control for active yaw moment compensation.<br>- Tyre slip ratio monitoring and traction limiting. |
+| **`feat-v3-al-qp`** | **Constrained Allocation (Augmented Lagrangian QP)**<br>- Real-time Quadratic Programming (QP) wheel torque allocation.<br>- Augmented Lagrangian solver targeting motor torque limits & thermal constraints.<br>- Designed for sub-5ms execution on embedded targets. |
+| **`feat-v4-embedded-nmpc-godmode`** | **Embedded Non-linear MPC & Differentiable Twin**<br>- Differentiable vehicle dynamics model.<br>- Non-linear Model Predictive Control (NMPC) for optimal yaw tracking and derating.<br>- STM32 micro-controller deployment code (200 Hz control loop). |
+
+---
+
+## 🛠️ How to Checkout a Feature Branch
+
+To explore or run a specific version of the project, fetch all remote branches and checkout the desired feature:
+
+```bash
+# Fetch all remote branches
+git fetch --all
+
+# Switch to a specific feature branch
+git checkout <branch-name>
