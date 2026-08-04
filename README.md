@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🏎️ TeR_ECU — Torque Vectoring eRacing
+# TeR_ECU — Torque Vectoring eRacing
 
-### Tecnun eRacing · Formula Student Electric Monoplaza
+### Tecnun eRacing · Formula Student Electric
 
 <img src="https://github.com/user-attachments/assets/19eb67bc-d25d-4a5b-bf23-312f95558412" width="720" alt="TeR_ECU board"/>
 
