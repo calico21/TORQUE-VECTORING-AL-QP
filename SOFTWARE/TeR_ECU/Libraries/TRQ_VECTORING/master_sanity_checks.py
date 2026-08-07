@@ -2,6 +2,8 @@ import ctypes
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import csv
+import time as _time
 
 # =====================================================================
 # 1. ESTRUCTURAS ACTUALIZADAS (Ctypes)
@@ -1670,6 +1672,302 @@ def run_phase17_scorecard(time_steps):
     print("-" * 80)
     print(f"\033[92m{'OVERALL WEIGHTED SCORE (0-100)':<42} | {score_alqp:<16.1f} | {score_nmpc:<16.1f}\033[0m")
     print("=" * 80 + "\n")
+
+GP_FW_TAG = "TeR_ECU/TRQ_VECTORING@testing"  # cosmetic session tag, not a real build hash
+
+class Branch2SMC:
+    """Lightweight Python approximation of Branch 2 (2-state EKF + Pacejka-lite
+    SMC with boundary layer). There is no compiled .so for Branch 2 in this
+    harness -- unlike v3/v4, which run the actual embedded C solver -- so
+    this reproduces the DOCUMENTED control law (sliding-surface Mz command,
+    smooth tanh boundary layer instead of a hard sign() switch to avoid the
+    chattering the boundary layer exists to prevent) closely enough to sit
+    alongside the others in a like-for-like comparison. Treat its absolute
+    numbers with more skepticism than v1 (an intentional replica of shipped
+    tv_mds.c) or v3/v4 (the real solver)."""
+    def __init__(self, k_smc=180.0, phi=0.6, d_torque_max=140.0):
+        self.k_smc = k_smc
+        self.phi = phi
+        self.d_torque_max = d_torque_max
+        self.vy_est = 0.0
+ 
+    def step(self, fx_driver, delta, vx, wz_meas, ay_meas, dt):
+        wb = GP_LF_PY + GP_LR_PY
+        vx_safe = max(abs(vx), 1.0)
+        # Crude leaky-integrator vy estimate standing in for the real 2-state
+        # EKF's [vy, gyro-bias] pair -- the leak (0.98) is a rough proxy for
+        # the EKF's bias-correction term, not a rigorous reproduction of it.
+        vy_dot = ay_meas - vx_safe * wz_meas
+        self.vy_est = 0.98 * (self.vy_est + vy_dot * dt)
+ 
+        wz_ref = (vx * delta) / wb if vx > 1.0 else 0.0
+        s = wz_ref - wz_meas                          # sliding surface
+        d_torque = self.k_smc * np.tanh(s / self.phi)  # smooth boundary layer
+        d_torque = np.clip(d_torque, -self.d_torque_max, self.d_torque_max)
+ 
+        nom = (fx_driver * 0.2032) / 2.0
+        return nom - d_torque / 2.0, nom + d_torque / 2.0
+
+def scenario_v18_endurance_stint(t):
+    """~16s composite stint (launch -> slalom -> trail-brake hairpin+regen ->
+    high-speed chicane) stitched into one continuous timeline instead of four
+    isolated bench scenarios -- a live telemetry pull off the car is one
+    continuous stint, not four separate button-presses on the bench.
+    Returns only the EXOGENOUS drive channels (fx, delta, vx, ax, brake);
+    wz/vy/ay are closed-loop state produced by each controller's own plant
+    in the runner below, not scripted here."""
+    if t < 2.0:
+        vx = max(t * 9.0, 0.0)
+        fx, delta, ax, brake = 2800.0, 0.0, 9.0, 0.0
+    elif t < 6.0:
+        tt = t - 2.0
+        vx = 22.0
+        delta = np.sin(2 * np.pi * 1.8 * tt) * 0.50
+        fx, ax, brake = 1500.0, 0.0, 0.0
+    elif t < 10.0:
+        tt = t - 6.0
+        vx = max(22.0 - 9.0 * tt, 6.0)
+        braking = tt < 1.6
+        fx = -2200.0 if braking else 1800.0
+        delta = 0.0 if braking else 1.1
+        ax = -9.0 if braking else (fx / 250.0)
+        brake = 1.0 if braking else 0.0
+    else:
+        tt = t - 10.0
+        vx = 30.0
+        delta = np.sin(2 * np.pi * 1.2 * tt) * 0.42
+        fx, ax, brake = 1200.0, 0.0, 0.0
+    return fx, delta, vx, ax, brake
+ 
+ 
+def _v18_fft_hf_energy(sig, dt, cutoff_hz=20.0):
+    detrended = sig - np.linspace(sig[0], sig[-1], len(sig))
+    fft_vals = np.abs(np.fft.rfft(detrended * np.hanning(len(detrended))))
+    freqs = np.fft.rfftfreq(len(detrended), d=dt)
+    return float(np.sum(fft_vals[freqs > cutoff_hz]))
+ 
+ 
+def run_phase18_live_telemetry_comparison(stream_stride=50):
+    """Closed-loop four-way replay: v1 Branch 1 PI, v2 Branch 2 SMC (Python
+    approximation), v3 Branch 3 AL-QP, v4 Branch 4 NMPC. Each controller
+    drives its OWN plant instance from its OWN Mz command, so divergence
+    between them is genuine closed-loop controller performance."""
+    print("\n" + "=" * 96)
+    print("  PHASE 18: LIVE TELEMETRY COMPARISON -- v1 (PI) vs v2 (SMC) vs v3 (AL-QP) vs v4 (NMPC)")
+    print("=" * 96)
+ 
+    dt, t_total = 0.005, 16.0
+    time_steps = np.arange(0.0, t_total, dt)
+    n = len(time_steps)
+    session_id = _time.strftime("TER27-%Y%m%d-%H%M%S")
+ 
+    print(f"  session: {session_id}  |  fw: {GP_FW_TAG}  |  rate: {1.0/dt:.0f} Hz  |  "
+          f"samples: {n}  |  duration: {t_total:.1f}s")
+    print("  scenario: composite endurance stint (launch / slalom / hairpin+regen / chicane)")
+    print("=" * 96)
+ 
+    controllers = ("v1", "v2", "v3", "v4")
+ 
+    # Identical control-loop sensor-noise/latency REALIZATION across all four
+    # -- any seed mismatch here would let random draw, not controller
+    # behavior, decide who "wins."
+    hw = {k: HardwareNonIdealities(delay_ticks=1, seed=4242) for k in controllers}
+ 
+    # Separate, fixed-seed, NOT-fed-back telemetry noise applied only to the
+    # logged/plotted values -- mirrors what a real CAN logger reports
+    # (transducer + quantization noise on top of a control loop that already
+    # sees its own, separate, sensor noise via HardwareNonIdealities above).
+    # Same draw sequence for every controller so it can't bias the comparison.
+    telem_rng = np.random.default_rng(777)
+ 
+    legacy = LegacyTV()
+    smc = Branch2SMC()
+    state_v3, state_v4 = TVState(), TVState()
+    gp_lib_alqp.gp_tv_init(ctypes.byref(state_v3))
+    gp_lib_nmpc.gp_tv_init(ctypes.byref(state_v4))
+    for s in (state_v3, state_v4):
+        s.tc.mu_surface[0] = 1.5
+        s.tc.mu_surface[1] = 1.5
+    rg = default_regen_limits(enable=1, max_total_trq=250.0, max_charge_power_w=40000.0)
+ 
+    plant = {k: ClosedLoopBicyclePlant() for k in controllers}
+    wz_true = {k: 0.0 for k in controllers}
+    vy_true = {k: 0.0 for k in controllers}
+ 
+    log = {k: {"t_rl": [], "t_rr": [], "mz": [], "wz_ref": [], "wz_meas": [],
+               "beta_deg": [], "mz_sat": [], "regen_w": []} for k in controllers}
+ 
+    wb = GP_LF_PY + GP_LR_PY
+    STREAM_COLOR = {"v1": "\033[97m", "v2": "\033[92m", "v3": "\033[94m", "v4": "\033[93m"}
+    RESET = "\033[0m"
+ 
+    for i, t in enumerate(time_steps):
+        fx, delta, vx, ax, brake = scenario_v18_endurance_stint(t)
+        wz_ref = (vx * delta) / wb if vx > 1.0 else 0.0
+        w_rear = max(vx, 0.0) / 0.2032
+        omega_scripted = [0.0, 0.0, w_rear, w_rear]
+ 
+        # ---- v1: Branch 1 PI (legacy tv_mds.c replica) ----
+        d1, wzn1, ayn1, axn1, om1 = hw["v1"].apply_sensor_noise(
+            delta, wz_true["v1"], wz_true["v1"] * vx, ax, omega_scripted)
+        rl1, rr1 = legacy.step(fx, d1, vx, wzn1, dt)
+        t1 = hw["v1"].process_actuator_delay([0.0, 0.0, rl1, rr1])
+        mz1 = (t1[3] - t1[2]) * plant["v1"].track_r / (2.0 * plant["v1"].r_wheel)
+        vy_true["v1"], wz_true["v1"], _ = plant["v1"].step(vx, delta, mz1, dt)
+ 
+        # ---- v2: Branch 2 SMC (Python approximation) ----
+        d2, wzn2, ayn2, axn2, om2 = hw["v2"].apply_sensor_noise(
+            delta, wz_true["v2"], wz_true["v2"] * vx, ax, omega_scripted)
+        rl2, rr2 = smc.step(fx, d2, vx, wzn2, ayn2, dt)
+        t2 = hw["v2"].process_actuator_delay([0.0, 0.0, rl2, rr2])
+        mz2 = (t2[3] - t2[2]) * plant["v2"].track_r / (2.0 * plant["v2"].r_wheel)
+        vy_true["v2"], wz_true["v2"], _ = plant["v2"].step(vx, delta, mz2, dt)
+ 
+        # ---- v3: Branch 3 AL-QP ----
+        d3, wzn3, ayn3, axn3, om3 = hw["v3"].apply_sensor_noise(
+            delta, wz_true["v3"], wz_true["v3"] * vx, ax, omega_scripted)
+        omega_c3, t_out3 = (ctypes.c_float * 4)(*om3), (ctypes.c_float * 4)()
+        gp_lib_alqp.gp_tv_step(fx, d3, vx, vy_true["v3"], wzn3, ayn3, axn3, omega_c3, brake,
+                                60.0, 60.0, 0.0, 0, ctypes.byref(rg), dt,
+                                ctypes.byref(state_v3), t_out3)
+        t3 = hw["v3"].process_actuator_delay(list(t_out3))
+        mz3 = (t3[3] - t3[2]) * plant["v3"].track_r / (2.0 * plant["v3"].r_wheel)
+        vy_true["v3"], wz_true["v3"], _ = plant["v3"].step(vx, delta, mz3, dt)
+ 
+        # ---- v4: Branch 4 NMPC ----
+        d4, wzn4, ayn4, axn4, om4 = hw["v4"].apply_sensor_noise(
+            delta, wz_true["v4"], wz_true["v4"] * vx, ax, omega_scripted)
+        omega_c4, t_out4 = (ctypes.c_float * 4)(*om4), (ctypes.c_float * 4)()
+        gp_lib_nmpc.gp_tv_step(fx, d4, vx, vy_true["v4"], wzn4, ayn4, axn4, omega_c4, brake,
+                                60.0, 60.0, 0.0, 0, ctypes.byref(rg), dt,
+                                ctypes.byref(state_v4), t_out4)
+        t4 = hw["v4"].process_actuator_delay(list(t_out4))
+        mz4 = (t4[3] - t4[2]) * plant["v4"].track_r / (2.0 * plant["v4"].r_wheel)
+        vy_true["v4"], wz_true["v4"], _ = plant["v4"].step(vx, delta, mz4, dt)
+ 
+        frames = {
+            "v1": (t1, mz1, float("nan"), float("nan")),
+            "v2": (t2, mz2, float("nan"), float("nan")),
+            "v3": (t3, mz3, np.degrees(state_v3.ekf.beta_est), state_v3.mz_sat_ratio),
+            "v4": (t4, mz4, np.degrees(state_v4.ekf.beta_est), state_v4.mz_sat_ratio),
+        }
+        for k, (tk, mzk, betak, satk) in frames.items():
+            rl_rep = tk[2] + telem_rng.normal(0, 0.35)
+            rr_rep = tk[3] + telem_rng.normal(0, 0.35)
+            mz_rep = mzk + telem_rng.normal(0, 0.5)
+            wz_rep = wz_true[k] + telem_rng.normal(0, 0.012)
+            regen_w = -(min(tk[2], 0.0) + min(tk[3], 0.0)) * w_rear
+            log[k]["t_rl"].append(rl_rep); log[k]["t_rr"].append(rr_rep)
+            log[k]["mz"].append(mz_rep); log[k]["wz_ref"].append(wz_ref)
+            log[k]["wz_meas"].append(wz_rep); log[k]["beta_deg"].append(betak)
+            log[k]["mz_sat"].append(satk); log[k]["regen_w"].append(regen_w)
+ 
+        if i % stream_stride == 0:
+            for k in controllers:
+                tk = log[k]
+                print(f"{STREAM_COLOR[k]}[{t*1000:7.1f} ms] {k.upper()} | "
+                      f"RL {tk['t_rl'][-1]:6.1f} Nm  RR {tk['t_rr'][-1]:6.1f} Nm  "
+                      f"Mz {tk['mz'][-1]:6.1f} Nm  wz {tk['wz_meas'][-1]:5.2f} rad/s "
+                      f"(ref {tk['wz_ref'][-1]:5.2f})  beta {tk['beta_deg'][-1]:5.1f} deg{RESET}")
+ 
+    print("=" * 96)
+ 
+    # ---- CSV export, mirrors a real data-logger pull ----
+    out_dir = os.path.join('output', 'telemetry')
+    os.makedirs(out_dir, exist_ok=True)
+    csv_path = os.path.join(out_dir, f"{session_id}_phase18_comparison.csv")
+    with open(csv_path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(["t_ms", "controller", "t_rl_nm", "t_rr_nm", "mz_nm",
+                    "wz_ref_rads", "wz_meas_rads", "beta_deg", "mz_sat_ratio", "regen_w"])
+        for i, t in enumerate(time_steps):
+            for k in controllers:
+                tk = log[k]
+                w.writerow([f"{t*1000:.1f}", k, f"{tk['t_rl'][i]:.2f}", f"{tk['t_rr'][i]:.2f}",
+                            f"{tk['mz'][i]:.2f}", f"{tk['wz_ref'][i]:.4f}", f"{tk['wz_meas'][i]:.4f}",
+                            f"{tk['beta_deg'][i]:.2f}", f"{tk['mz_sat'][i]:.3f}", f"{tk['regen_w'][i]:.1f}"])
+    print(f"  Telemetry export written: {csv_path}")
+ 
+    # ---- Scorecard ----
+    print("\n" + "-" * 96)
+    print(f"{'Controller':<12} | {'wz RMS err':<11} | {'Peak |beta|':<12} | {'Mean |slew|':<12} | "
+          f"{'HF energy':<10} | {'Peak Nm':<8} | {'Regen kJ':<9} | Status")
+    print("-" * 96)
+    kpis = {}
+    for k in controllers:
+        wz_meas = np.array(log[k]["wz_meas"]); wz_ref = np.array(log[k]["wz_ref"])
+        mz = np.array(log[k]["mz"]); rl = np.array(log[k]["t_rl"]); rr = np.array(log[k]["t_rr"])
+        beta = np.array(log[k]["beta_deg"]); regen_w = np.array(log[k]["regen_w"])
+ 
+        rms_err = float(np.sqrt(np.mean((wz_meas - wz_ref) ** 2)))
+        peak_beta = float(np.nanmax(np.abs(beta))) if not np.all(np.isnan(beta)) else float("nan")
+        mean_slew = float(np.mean(np.abs(np.diff(mz)) / dt))
+        hf_energy = _v18_fft_hf_energy(mz, dt)
+        peak_nm = float(np.max(np.abs(np.concatenate([rl, rr]))))
+        regen_kj = float(np.sum(regen_w) * dt / 1000.0)
+ 
+        exploding = peak_nm > 600.0
+        chattering = mean_slew > 4500.0 or hf_energy > 20000.0
+        status = "FAIL" if exploding else ("WARN" if chattering else "PASS")
+        color = "\033[91m" if status == "FAIL" else ("\033[93m" if status == "WARN" else "\033[92m")
+ 
+        kpis[k] = dict(rms_err=rms_err, peak_beta=peak_beta, mean_slew=mean_slew,
+                        hf_energy=hf_energy, peak_nm=peak_nm, regen_kj=regen_kj, status=status)
+        print(f"{k.upper():<12} | {rms_err:<11.4f} | {peak_beta:<12.2f} | {mean_slew:<12.1f} | "
+              f"{hf_energy:<10.1f} | {peak_nm:<8.1f} | {regen_kj:<9.2f} | {color}{status}\033[0m")
+    print("-" * 96 + "\n")
+ 
+    # ---- Dashboard plot ----
+    fig, axs = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle(f'Phase 18: Live Telemetry Comparison -- session {session_id}',
+                 fontsize=15, fontweight='bold')
+    colors = {"v1": "#7f7f7f", "v2": "#2ca02c", "v3": "#0052cc", "v4": "#ff8800"}
+    styles = {"v1": "-", "v2": "-", "v3": "-", "v4": "--"}
+    labels = {"v1": "v1: Branch 1 PI", "v2": "v2: Branch 2 SMC (approx.)",
+              "v3": "v3: Branch 3 AL-QP", "v4": "v4: Branch 4 NMPC"}
+    segs = [(0, 2, '#eeeeee'), (2, 6, '#e8f0ff'), (6, 10, '#ffe8e8'), (10, 16, '#eaffe8')]
+ 
+    ax = axs[0, 0]
+    for a, b, c in segs: ax.axvspan(a, b, color=c, alpha=0.6, zorder=0)
+    ax.plot(time_steps, log["v1"]["wz_ref"], color='#333333', linestyle=':', linewidth=1.3, label='wz reference')
+    for k in controllers:
+        ax.plot(time_steps, log[k]["wz_meas"], color=colors[k], linestyle=styles[k], linewidth=1.6, label=labels[k])
+    ax.set_title('Yaw Rate Tracking', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('wz (rad/s)'); ax.legend(fontsize=8, loc='best')
+ 
+    ax = axs[0, 1]
+    for a, b, c in segs: ax.axvspan(a, b, color=c, alpha=0.6, zorder=0)
+    for k in controllers:
+        ax.plot(time_steps, log[k]["mz"], color=colors[k], linestyle=styles[k], linewidth=1.4, label=labels[k])
+    ax.set_title('Commanded Yaw Moment (Mz)', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('Mz (Nm)'); ax.legend(fontsize=8, loc='best')
+ 
+    ax = axs[1, 0]
+    for a, b, c in segs: ax.axvspan(a, b, color=c, alpha=0.6, zorder=0)
+    for k in ("v3", "v4"):
+        ax.plot(time_steps, log[k]["beta_deg"], color=colors[k], linestyle=styles[k], linewidth=1.8, label=labels[k])
+    ax.axhline(0, color='#999999', linewidth=0.8)
+    ax.set_title('Sideslip Angle (v1/v2 have no EKF -- omitted)', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('beta (deg)'); ax.legend(fontsize=8, loc='best')
+ 
+    ax = axs[1, 1]
+    for a, b, c in segs: ax.axvspan(a, b, color=c, alpha=0.6, zorder=0)
+    for k in controllers:
+        cum_kj = np.cumsum(np.array(log[k]["regen_w"])) * dt / 1000.0
+        ax.plot(time_steps, cum_kj, color=colors[k], linestyle=styles[k], linewidth=1.8, label=labels[k])
+    ax.set_title('Cumulative Regenerated Energy', fontsize=11, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('Energy (kJ)'); ax.legend(fontsize=8, loc='best')
+ 
+    plt.tight_layout()
+    out_dir_g = os.path.join('output', 'graphs')
+    os.makedirs(out_dir_g, exist_ok=True)
+    plot_path = os.path.join(out_dir_g, 'sanity_phase18_live_telemetry_comparison.png')
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    print(f"  Generated: {plot_path}\n")
+    plt.close()
+ 
+    return log, kpis
+ 
 # =====================================================================
 # 6. MAIN EXECUTION
 # =====================================================================
@@ -1829,6 +2127,7 @@ if __name__ == "__main__":
     run_phase15_closed_loop_dogfight()
     run_phase16_nmpc_weight_sweep()
     run_phase17_scorecard(time_steps)
+    run_phase18_live_telemetry_comparison()
     # ------------------ SECTION F: MONTE CARLO NOISE & LATENCY ------------------
     mc_scenarios = {
         "14: Skidpad Transition (Center Figure-8)": scenario_skidpad_transition,
