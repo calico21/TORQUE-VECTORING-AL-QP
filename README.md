@@ -66,14 +66,14 @@ This is the **control-software monorepo** for Tecnun eRacing's electric Formula 
 
 ```mermaid
 flowchart LR
-    subgraph MAIN["🏠 main — you are here"]
+    subgraph MAIN["main"]
         direction TB
         M1["Vehicle firmware\nCAN · Safety · State Machines"]
     end
     MAIN --> V1["🟢 feat-v1-simple-effective\nRule-based PI + FF"]
     MAIN --> V2["🔵 feat-v2-intermediate\nEKF + Sliding Mode"]
     MAIN --> V3["🟣 feat-v3-al-qp\nAugmented Lagrangian QP"]
-    MAIN --> V4["🔴 feat-v4-embedded-nmpc-godmode\nEmbedded NMPC"]
+    MAIN --> V4["🔴 feat-v4-embedded-nmpc\nEmbedded NMPC"]
 
     style MAIN fill:#1a1a2e,color:#fff,stroke:#e94560
     style V1 fill:#0b6e4f,color:#fff
@@ -309,25 +309,25 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph EST["📐 State Estimation Layer"]
+    subgraph EST["State Estimation Layer"]
         FZ["gp_estimate_fz\nlongitudinal+lateral+aero load transfer"]
         FY["gp_estimate_fy\ntanh-saturated tire lateral force"]
         EKF3["2-state EKF (vy, bz)\n+ 25Hz steering notch filter"]
     end
 
-    subgraph BOUNDS["🛡️ Physical Bound Derivation"]
+    subgraph BOUNDS["Physical Bound Derivation"]
         FRIC["Friction Ellipse:\nT_ub = √((μFz)² − Fy²) · R / wheel"]
         POW["Power/Thermal Limit:\nT_ub = P_max / ω, sigmoid-derated >75°C"]
         REGEN["Regen mirror bound:\ncharge-power ceiling,\nsoft-capped total budget"]
     end
 
-    subgraph QP["⚙️ AL-QP Solver (16 fixed iterations, O(1))"]
+    subgraph QP["AL-QP Solver (16 fixed iterations, O(1))"]
         NOM["Nominal allocation\n(Fx split + Mz/arm)"]
         SOLVE["gp_qp_solve_rwd_closedform\nsmooth active-set blend\n(4 candidates, sigmoid weights)"]
         LAM["Multiplier update λ\n(anti-windup back-calc via mz_sat_ratio)"]
     end
 
-    subgraph TC3["🎯 Predictive Traction Control"]
+    subgraph TC3["Predictive Traction Control"]
         RLS["Per-wheel RLS:\nθ = ∂Fx/∂κ live Pacejka gradient"]
         SEC["Hybrid secant / gradient-ascent\npeak-slip search"]
         KICK["Derivative-kick filter\n(curb-strike / lock-up, ±250 rad/s²)"]
