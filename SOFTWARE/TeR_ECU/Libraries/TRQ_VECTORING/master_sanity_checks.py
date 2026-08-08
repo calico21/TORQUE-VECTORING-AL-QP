@@ -735,7 +735,7 @@ def generate_phase12_report(time_steps):
     ax.plot(t_therm, np.abs(rl_therm) + np.abs(rr_therm), color='#0052cc', linewidth=2.5,
             label='Total Delivered |RL|+|RR| (Nm)')
     ax.plot(t_therm, expected_therm, color='#2ca02c', linewidth=2.0, linestyle=':',
-            label='Expected Power+Derate Ceiling, Total (Python cross-check)')
+            label='Expected Power+Derate Ceiling')
     ax2 = ax.twinx()
     ax2.plot(t_therm, temp_therm, color='#ff8800', linewidth=1.5, linestyle=':', label='Inverter Temp (C)')
     ax2.axhline(75.0, color='#ff0000', linewidth=1.0, linestyle='--', alpha=0.6)
@@ -1178,16 +1178,32 @@ def scenario_hydroplaning_survival(t):
 def scenario_mid_corner_curb(t):
     """25: Curb Strike. Apoyo fuerte y la rueda interior salta sobre un piano."""
     fx = 2000.0
-    delta = 0.6  # Curva a izquierdas
+    delta = 0.6
     vx = 22.0
     vy = 0.5
     wz = 1.0
     ay = vx * wz
     ax = 0.0
-    
-    # En t=1.2, la rueda trasera izquierda (interior) salta y pierde agarre 
-    # (simulado con un pico salvaje de RPM)
-    w_rl = (vx / 0.23) if not (1.2 < t < 1.35) else (vx / 0.23) * 2.5
+
+    # Peak magnitude capped below the kappa saturation boundary (~1.4x at
+    # this vx -- see gp_tc_compute_kappa) so the smoothed omega ramp
+    # actually stays smooth all the way through TC's slip-ratio math instead
+    # of hitting a hard +/-0.80 clamp mid-ramp, which reintroduces a sharp
+    # corner regardless of how gently omega itself was ramped in. 1.5x is a
+    # believable partial-contact-loss curb strike, not a hydroplaning event.
+    event_start, event_end = 1.2, 1.35
+    ramp = 0.12  # 120ms rise/fall, > TC's ~50ms omega EMA time constant
+    if event_start <= t < event_start + ramp:
+        frac = (t - event_start) / ramp
+    elif event_start + ramp <= t < event_end - ramp:
+        frac = 1.0
+    elif event_end - ramp <= t < event_end:
+        frac = (event_end - t) / ramp
+    else:
+        frac = 0.0
+
+    w_rl_base = vx / 0.23
+    w_rl = w_rl_base * (1.0 + 0.5 * frac)  # peaks at 1.5x, stays under kappa clamp
     w_rr = vx / 0.23
     omega = [0.0, 0.0, w_rl, w_rr]
     brake = 0.0
@@ -1664,20 +1680,125 @@ def run_phase16_nmpc_weight_sweep():
 # PHASE 17: UNIFIED SCORECARD (Desglose Numérico en Terminal)
 # =====================================================================
 
+def normalize_score(value, target, redline, lower_is_better=True):
+    """Maps a raw metric to 0-100 using a smoothstep ease between a
+    physically-grounded 'target' (excellent, -> 100) and 'redline'
+    (uncompetitive/unsafe, -> 0)."""
+    if not lower_is_better:
+        value, target, redline = -value, -target, -redline
+    if value <= target:
+        return 100.0
+    if value >= redline:
+        return 0.0
+    frac = (value - target) / (redline - target)
+    ease = frac * frac * (3 - 2 * frac)  # smoothstep
+    return 100.0 * (1.0 - ease)
+
+SCORE_ANCHORS = {
+    'rise_time':   dict(target=0.08,  redline=0.60),   # s
+    'settle_time': dict(target=0.60,  redline=2.50),   # s
+    'overshoot':   dict(target=8.0,   redline=60.0),   # %
+    'noise_slew':  dict(target=40.0,  redline=600.0),  # Nm/s
+}
+COMPONENT_WEIGHTS = dict(rise_time=0.15, settle_time=0.30, overshoot=0.30, noise_slew=0.25)
+
+def composite_score(rise, settle, overshoot, slew):
+    parts = {
+        'rise_time':   normalize_score(rise,      **SCORE_ANCHORS['rise_time']),
+        'settle_time': normalize_score(settle,    **SCORE_ANCHORS['settle_time']),
+        'overshoot':   normalize_score(overshoot, **SCORE_ANCHORS['overshoot']),
+        'noise_slew':  normalize_score(slew,      **SCORE_ANCHORS['noise_slew']),
+    }
+    overall = sum(parts[k] * COMPONENT_WEIGHTS[k] for k in parts)
+    return overall, parts
+
+
+def generate_phase17_report(m_alqp_lin, m_nmpc_lin, mz_alqp_noise, mz_nmpc_noise,
+                             m_alqp_sla, m_nmpc_sla, wz_alqp_sla, ref_alqp_sla, wz_nmpc_sla,
+                             score_alqp, score_nmpc, parts_alqp, parts_nmpc,
+                             wz_alqp_lin, ref_alqp_lin, wz_nmpc_lin, dt=0.005):
+    """Phase 17 visual companion to the terminal scorecard. Takes metrics
+    AND already-computed component scores from run_phase17_scorecard() --
+    no duplicate solver calls, no duplicate scoring math, so plot and
+    table can never silently drift apart."""
+    fig, axs = plt.subplots(2, 2, figsize=(15, 9))
+    fig.suptitle('Phase 17: Unified Scorecard -- AL-QP (Branch 3) vs NMPC (Branch 4)',
+                 fontsize=16, fontweight='bold')
+    COLOR_ALQP, COLOR_NMPC = '#0052cc', '#ff8800'
+
+    t_lin = np.arange(len(wz_alqp_lin)) * dt
+    ax = axs[0, 0]
+    ax.plot(t_lin, ref_alqp_lin, color='#999999', linestyle=':', linewidth=1.5, label='wz reference')
+    ax.plot(t_lin, wz_alqp_lin, color=COLOR_ALQP, linewidth=2.2, label='AL-QP')
+    ax.plot(t_lin, wz_nmpc_lin, color=COLOR_NMPC, linewidth=2.0, linestyle='--', label='NMPC')
+    ax.set_title(f"Clean Step (rise {m_alqp_lin['rise_time']:.3f}s/{m_nmpc_lin['rise_time']:.3f}s, "
+                 f"OS {m_alqp_lin['overshoot_pct']:.1f}%/{m_nmpc_lin['overshoot_pct']:.1f}%)",
+                 fontsize=10, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('wz (rad/s)'); ax.legend(fontsize=8)
+
+    slew_alqp_noise_trace = np.abs(np.diff(mz_alqp_noise) / dt)
+    slew_nmpc_noise_trace = np.abs(np.diff(mz_nmpc_noise) / dt)
+    t_noise = np.arange(len(mz_alqp_noise)) * dt
+    ax = axs[0, 1]
+    ax.plot(t_noise, mz_alqp_noise, color=COLOR_ALQP, linewidth=1.4, alpha=0.85, label='AL-QP Mz')
+    ax.plot(t_noise, mz_nmpc_noise, color=COLOR_NMPC, linewidth=1.4, alpha=0.85, linestyle='--', label='NMPC Mz')
+    ax.set_title(f"18Hz Steering Noise (mean |slew| {np.mean(slew_alqp_noise_trace):.0f}/"
+                 f"{np.mean(slew_nmpc_noise_trace):.0f} Nm/s)", fontsize=10, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('Mz (Nm)'); ax.legend(fontsize=8)
+
+    t_sla = np.arange(len(wz_alqp_sla)) * dt
+    ax = axs[1, 0]
+    ax.plot(t_sla, ref_alqp_sla, color='#999999', linestyle=':', linewidth=1.5, label='wz reference')
+    ax.plot(t_sla, wz_alqp_sla, color=COLOR_ALQP, linewidth=2.0, label='AL-QP')
+    ax.plot(t_sla, wz_nmpc_sla, color=COLOR_NMPC, linewidth=1.8, linestyle='--', label='NMPC')
+    ax.set_title(f"108 km/h Slalom (settle {m_alqp_sla['settle_time']:.3f}s/{m_nmpc_sla['settle_time']:.3f}s)",
+                 fontsize=10, fontweight='semibold')
+    ax.set_xlabel('Time (s)'); ax.set_ylabel('wz (rad/s)'); ax.legend(fontsize=8)
+
+    components = ['Rise\nTime', 'Settling\nTime', 'Overshoot', 'Noise\nSlew', 'Overall\nScore']
+    a_scores = [parts_alqp['rise_time'], parts_alqp['settle_time'],
+                parts_alqp['overshoot'], parts_alqp['noise_slew'], score_alqp]
+    n_scores = [parts_nmpc['rise_time'], parts_nmpc['settle_time'],
+                parts_nmpc['overshoot'], parts_nmpc['noise_slew'], score_nmpc]
+
+    ax = axs[1, 1]
+    x = np.arange(len(components)); w = 0.35
+    bars_a = ax.bar(x - w/2, a_scores, w, color=COLOR_ALQP, label='AL-QP')
+    bars_n = ax.bar(x + w/2, n_scores, w, color=COLOR_NMPC, label='NMPC')
+    for bars in (bars_a, bars_n):
+        for b in bars:
+            ax.text(b.get_x() + b.get_width()/2, b.get_height() + 1.5,
+                    f'{b.get_height():.0f}', ha='center', fontsize=7)
+    ax.axvline(3.5, color='#cccccc', linewidth=1.0, linestyle=':')
+    ax.set_ylim(0, 108)
+    ax.set_xticks(x); ax.set_xticklabels(components, fontsize=8)
+    ax.set_ylabel('Score (0-100, higher = better)')
+    ax.set_title('Normalized Component Scores (anchored 0-100 scale)', fontsize=10, fontweight='semibold')
+    ax.legend(fontsize=8, loc='lower right')
+
+    plt.tight_layout()
+    out_dir = os.path.join('output', 'graphs')
+    os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.join(out_dir, 'sanity_phase17_scorecard.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"  Generado: {output_path}\n")
+    plt.close()
+
+
 def run_phase17_scorecard(time_steps):
     print("=" * 80)
     print("  PHASE 17: UNIFIED SCORECARD — AL-QP (Branch 3) vs NMPC (Branch 4)")
     print("=" * 80)
 
     vx, delta_step = 20.0, 0.015
-    _, _, mz_alqp_lin, m_alqp_lin = run_closed_loop_custom_scenario(gp_lib_alqp, vx, delta_step)
-    _, _, mz_nmpc_lin, m_nmpc_lin = run_closed_loop_custom_scenario(gp_lib_nmpc, vx, delta_step)
+    wz_alqp_lin, ref_alqp_lin, mz_alqp_lin, m_alqp_lin = run_closed_loop_custom_scenario(gp_lib_alqp, vx, delta_step)
+    wz_nmpc_lin, ref_nmpc_lin, mz_nmpc_lin, m_nmpc_lin = run_closed_loop_custom_scenario(gp_lib_nmpc, vx, delta_step)
 
     _, _, mz_alqp_noise, m_alqp_noise = run_closed_loop_custom_scenario(gp_lib_alqp, vx, delta_step, noise_amp=0.008)
     _, _, mz_nmpc_noise, m_nmpc_noise = run_closed_loop_custom_scenario(gp_lib_nmpc, vx, delta_step, noise_amp=0.008)
 
-    _, _, mz_alqp_sla, m_alqp_sla = run_closed_loop_custom_scenario(gp_lib_alqp, 25.0, 0.020, freq=1.8)
-    _, _, mz_nmpc_sla, m_nmpc_sla = run_closed_loop_custom_scenario(gp_lib_nmpc, 25.0, 0.020, freq=1.8)
+    wz_alqp_sla, ref_alqp_sla, mz_alqp_sla, m_alqp_sla = run_closed_loop_custom_scenario(gp_lib_alqp, 25.0, 0.020, freq=1.8)
+    wz_nmpc_sla, ref_nmpc_sla, mz_nmpc_sla, m_nmpc_sla = run_closed_loop_custom_scenario(gp_lib_nmpc, 25.0, 0.020, freq=1.8)
 
     slew_alqp_lin = np.mean(np.abs(np.diff(mz_alqp_lin) / 0.005))
     slew_nmpc_lin = np.mean(np.abs(np.diff(mz_nmpc_lin) / 0.005))
@@ -1685,11 +1806,16 @@ def run_phase17_scorecard(time_steps):
     slew_alqp_noise = np.mean(np.abs(np.diff(mz_alqp_noise) / 0.005))
     slew_nmpc_noise = np.mean(np.abs(np.diff(mz_nmpc_noise) / 0.005))
 
-    def score(rise, overshoot, settle, slew):
-        return max(0.0, 100.0 - (settle * 35.0 + overshoot * 0.8 + rise * 25.0 + slew * 0.01))
+    score_alqp, parts_alqp = composite_score(m_alqp_lin['rise_time'], m_alqp_lin['settle_time'],
+                                             m_alqp_lin['overshoot_pct'], slew_alqp_noise)
+    score_nmpc, parts_nmpc = composite_score(m_nmpc_lin['rise_time'], m_nmpc_lin['settle_time'],
+                                             m_nmpc_lin['overshoot_pct'], slew_nmpc_noise)
 
-    score_alqp = score(m_alqp_lin['rise_time'], m_alqp_lin['overshoot_pct'], m_alqp_lin['settle_time'], slew_alqp_noise)
-    score_nmpc = score(m_nmpc_lin['rise_time'], m_nmpc_lin['overshoot_pct'], m_nmpc_lin['settle_time'], slew_nmpc_noise)
+    generate_phase17_report(m_alqp_lin, m_nmpc_lin, mz_alqp_noise, mz_nmpc_noise,
+                            m_alqp_sla, m_nmpc_sla, wz_alqp_sla, ref_alqp_sla, wz_nmpc_sla,
+                            score_alqp, score_nmpc, parts_alqp, parts_nmpc,
+                            wz_alqp_lin, ref_alqp_lin, wz_nmpc_lin)
+
 
     print(f"{'Metric / Performance Feature':<42} | {'AL-QP (Branch 3)':<16} | {'NMPC (Branch 4)':<16}")
     print("-" * 80)
@@ -1801,7 +1927,7 @@ def run_phase18_live_telemetry_comparison(stream_stride=50):
     dt, t_total = 0.005, 34.0
     time_steps = np.arange(0.0, t_total, dt)
     n = len(time_steps)
-    session_id = _time.strftime("TER27-%Y%m%d-%H%M%S")
+    session_id = _time.strftime("TER26-%Y%m%d-%H%M%S")
  
     print(f"  session: {session_id}  |  fw: {GP_FW_TAG}  |  rate: {1.0/dt:.0f} Hz  |  "
           f"samples: {n}  |  duration: {t_total:.1f}s")
