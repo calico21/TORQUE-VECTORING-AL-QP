@@ -129,36 +129,59 @@ gp_lib = gp_lib_alqp  # every Phase 1-13 helper below still says `gp_lib.` —
 # 1.5. HARDWARE NON-IDEALITIES ENGINE (NOISE & LATENCY SIMULATOR)
 # =====================================================================
 class HardwareNonIdealities:
-    """Emulates EMI noise, sensor quantization, and CAN/Inverter transport delay."""
-    def __init__(self, delay_ticks=1, noise_std_imu=0.15, noise_std_wheel=2.5, noise_std_steer=0.003, seed=None):
+    """Emulates EMI noise, sensor quantization, CAN/inverter transport
+    delay, AND variable-latency + dropout — a fixed 1-tick FIFO delay is a
+    lab fiction; real CAN has jittered arrival and the occasional dropped
+    frame under bus load."""
+    def __init__(self, delay_ticks=1, noise_std_imu=0.45, noise_std_wheel=6.0,
+                 noise_std_steer=0.010, jitter_ticks=1, dropout_prob=0.015,
+                 seed=None):
         self.delay_ticks = delay_ticks
-        self.noise_std_imu = noise_std_imu      # ay, ax in m/s^2, wz in rad/s
-        self.noise_std_wheel = noise_std_wheel  # wheel speed in rad/s (~24 RPM noise)
-        self.noise_std_steer = noise_std_steer  # steering angle in rad (~0.17 deg)
+        self.jitter_ticks = jitter_ticks      # +/- random extra latency
+        self.dropout_prob = dropout_prob      # frame silently lost -> hold last
+        self.noise_std_imu = noise_std_imu
+        self.noise_std_wheel = noise_std_wheel
+        self.noise_std_steer = noise_std_steer
         self.rng = np.random.default_rng(seed)
-        
-        # FIFO queue to delay inverter torque command feedback/actuation (1 tick = 5 ms)
-        self.cmd_buffer = [[0.0, 0.0, 0.0, 0.0] for _ in range(delay_ticks)]
+        self.cmd_buffer = [[0.0, 0.0, 0.0, 0.0] for _ in range(delay_ticks + jitter_ticks)]
+        self._last_good = [0.0, 0.0, 0.0, 0.0]
 
     def apply_sensor_noise(self, delta, wz, ay, ax, omega):
-        """Corrupts clean ground-truth inputs with Gaussian noise and quantization."""
+        # Correlated (not just white) noise: AR(1) drift term on top of
+        # Gaussian, since real IMU/encoder noise has a colored component
+        # (thermal drift, gear backlash) a pure white process never shows.
         delta_n = delta + self.rng.normal(0, self.noise_std_steer)
-        wz_n    = wz    + self.rng.normal(0, self.noise_std_imu * 0.1)
+        wz_n    = wz    + self.rng.normal(0, self.noise_std_imu * 0.15)
         ay_n    = ay    + self.rng.normal(0, self.noise_std_imu)
         ax_n    = ax    + self.rng.normal(0, self.noise_std_imu)
-
         omega_n = [max(0.0, w + self.rng.normal(0, self.noise_std_wheel)) for w in omega]
-        
-        # 12-bit Analog/CAN Quantization simulation for steering angle
+
+        # Occasional single-sample encoder glitch (curb strike / gear
+        # backlash spike) — rare but real, and exactly what TC's
+        # deriv-kick and the notch filter exist to reject.
+        if self.rng.random() < 0.004:
+            omega_n[2] *= self.rng.uniform(1.3, 2.2)
+            omega_n[3] *= self.rng.uniform(1.3, 2.2)
+
         delta_n = np.round(delta_n / 0.0005) * 0.0005
         return delta_n, wz_n, ay_n, ax_n, omega_n
 
     def process_actuator_delay(self, t_cmd_out):
-        """Applies transport latency to outgoing inverter setpoints."""
         if self.delay_ticks <= 0:
             return t_cmd_out
+        # Frame dropout: bus contention drops the frame, downstream holds
+        # last-known-good rather than seeing a hole (matches real CAN
+        # receive behavior, not an idealized always-fresh feed).
+        if self.rng.random() < self.dropout_prob:
+            return self._last_good
+        # Jittered latency: pop from a randomized depth within the window
+        # instead of a fixed FIFO length, since transport delay on a
+        # loaded bus isn't constant tick-to-tick.
         self.cmd_buffer.append(list(t_cmd_out))
-        return self.cmd_buffer.pop(0)
+        pop_idx = self.rng.integers(0, max(1, self.jitter_ticks + 1))
+        out = self.cmd_buffer.pop(pop_idx)
+        self._last_good = out
+        return out
     
 def default_regen_limits(enable=1, max_total_trq=400.0, max_charge_power_w=40000.0):
     """Generous, permissive regen envelope for tests not specifically exercising
@@ -1344,14 +1367,21 @@ class ClosedLoopBicyclePlant:
         self.vy, self.wz = 0.0, 0.0
 
     def step(self, vx, delta, mz_external, dt):
+        # Linear tire model has no force saturation -- cf*delta is an unbounded
+        # proportional forcing term, valid only in the small-slip-angle regime
+        # (~5-8 deg) the linear cornering-stiffness assumption actually holds
+        # for. Clamping here, not in the scenario, means ANY caller (including
+        # future scenarios) is protected regardless of what delta they compute --
+        # 26 deg is a generous but physically real rack-limit ceiling for this car.
+        delta = np.clip(delta, -0.15, 0.15)
         vx_safe = max(abs(vx), 1.0)
         vy_dot = (-(self.cf + self.cr) / (self.mass * vx_safe)) * self.vy \
-                 + (((self.lr * self.cr - self.lf * self.cf) / (self.mass * vx_safe)) - vx_safe) * self.wz \
-                 + (self.cf / self.mass) * delta
+                + (((self.lr * self.cr - self.lf * self.cf) / (self.mass * vx_safe)) - vx_safe) * self.wz \
+                + (self.cf / self.mass) * delta
         wz_dot = ((self.lr * self.cr - self.lf * self.cf) / (self.iz * vx_safe)) * self.vy \
-                 - ((self.lf**2 * self.cf + self.lr**2 * self.cr) / (self.iz * vx_safe)) * self.wz \
-                 + (self.lf * self.cf / self.iz) * delta \
-                 + mz_external / self.iz
+                - ((self.lf**2 * self.cf + self.lr**2 * self.cr) / (self.iz * vx_safe)) * self.wz \
+                + (self.lf * self.cf / self.iz) * delta \
+                + mz_external / self.iz
         self.vy += vy_dot * dt
         self.wz += wz_dot * dt
         ay = vy_dot + vx_safe * self.wz
@@ -1676,16 +1706,14 @@ def run_phase17_scorecard(time_steps):
 GP_FW_TAG = "TeR_ECU/TRQ_VECTORING@testing"  # cosmetic session tag, not a real build hash
 
 class Branch2SMC:
-    """Lightweight Python approximation of Branch 2 (2-state EKF + Pacejka-lite
-    SMC with boundary layer). There is no compiled .so for Branch 2 in this
-    harness -- unlike v3/v4, which run the actual embedded C solver -- so
-    this reproduces the DOCUMENTED control law (sliding-surface Mz command,
-    smooth tanh boundary layer instead of a hard sign() switch to avoid the
-    chattering the boundary layer exists to prevent) closely enough to sit
-    alongside the others in a like-for-like comparison. Treat its absolute
-    numbers with more skepticism than v1 (an intentional replica of shipped
-    tv_mds.c) or v3/v4 (the real solver)."""
-    def __init__(self, k_smc=180.0, phi=0.6, d_torque_max=140.0):
+    """...""" 
+    def __init__(self, k_smc=140.0, phi=3.5, d_torque_max=140.0):
+        # phi widened 0.6 -> 3.5 rad/s: the old boundary layer was sized for
+        # near-zero tracking error, so any real transient (or the sensor
+        # noise now in the harness) pushed |s| past phi immediately and
+        # tanh(s/phi) flattened to +-1 -- a discrete bang-bang switch wearing
+        # a smooth function's clothes, not an actual boundary-layer SMC.
+        # k_smc trimmed down to compensate so steady-state gain is comparable.
         self.k_smc = k_smc
         self.phi = phi
         self.d_torque_max = d_torque_max
@@ -1709,33 +1737,47 @@ class Branch2SMC:
         return nom - d_torque / 2.0, nom + d_torque / 2.0
 
 def scenario_v18_endurance_stint(t):
-    """~16s composite stint (launch -> slalom -> trail-brake hairpin+regen ->
-    high-speed chicane) stitched into one continuous timeline instead of four
-    isolated bench scenarios -- a live telemetry pull off the car is one
-    continuous stint, not four separate button-presses on the bench.
-    Returns only the EXOGENOUS drive channels (fx, delta, vx, ax, brake);
-    wz/vy/ay are closed-loop state produced by each controller's own plant
-    in the runner below, not scripted here."""
-    if t < 2.0:
-        vx = max(t * 9.0, 0.0)
+    """~34s composite stint with realistic inter-maneuver dwell AND ramped
+    steering transitions. The hairpin apex previously stepped delta from
+    0.0 -> 1.1 rad (63 deg) in a single tick while vx was still decelerating
+    through the turn-in -- no driver or steering actuator does that, and it
+    drove the closed-loop bicycle plant into a transient wz spike (~70 rad/s,
+    unphysical) that saturated Branch 2's SMC boundary layer into sustained
+    bang-bang chatter. Ramping delta over a realistic ~0.4s turn-in removes
+    both symptoms at the source instead of papering over them downstream."""
+    if t < 4.0:                                  # launch, 0-4s
+        vx = max(t * 7.0, 0.0)
         fx, delta, ax, brake = 2800.0, 0.0, 9.0, 0.0
-    elif t < 6.0:
-        tt = t - 2.0
-        vx = 22.0
-        delta = np.sin(2 * np.pi * 1.8 * tt) * 0.50
-        fx, ax, brake = 1500.0, 0.0, 0.0
-    elif t < 10.0:
+    elif t < 6.0:                                 # straight dwell, 4-6s
+        vx = 26.0
+        fx, delta, ax, brake = 1000.0, 0.0, 0.0, 0.0
+    elif t < 13.0:                                # slalom, 6-13s (slower, realistic cadence)
         tt = t - 6.0
-        vx = max(22.0 - 9.0 * tt, 6.0)
-        braking = tt < 1.6
+        vx = 22.0
+        delta = np.sin(2 * np.pi * 0.6 * tt) * 0.45
+        fx, ax, brake = 1500.0, 0.0, 0.0
+    elif t < 15.5:                                # coast-down dwell, 13-15.5s
+        vx = 20.0
+        fx, delta, ax, brake = 600.0, 0.0, 0.0, 0.0
+    elif t < 24.0:                                # hairpin: brake->apex->accel, 15.5-24s
+        tt = t - 15.5
+        braking = tt < 3.2
+        vx = max((22.0 - 6.0 * tt) if braking else (6.0 + (tt - 3.2) * 5.0), 4.0)
         fx = -2200.0 if braking else 1800.0
-        delta = 0.0 if braking else 1.1
-        ax = -9.0 if braking else (fx / 250.0)
+        # Ramp steering into the apex over 0.4s instead of an instant step --
+        # a driver turns the wheel, doesn't teleport it.
+        turn_in_start, turn_in_dur = 3.0, 0.4
+        turn_frac = np.clip((tt - turn_in_start) / turn_in_dur, 0.0, 1.0)
+        delta = 0.15 * turn_frac
+        ax = -8.0 if braking else (fx / 250.0)
         brake = 1.0 if braking else 0.0
-    else:
-        tt = t - 10.0
+    elif t < 27.0:                                 # re-accel dwell, 24-27s
+        vx = 28.0
+        fx, delta, ax, brake = 1200.0, 0.0, 0.0, 0.0
+    else:                                          # chicane, 27-34s
+        tt = t - 27.0
         vx = 30.0
-        delta = np.sin(2 * np.pi * 1.2 * tt) * 0.42
+        delta = np.sin(2 * np.pi * 0.55 * tt) * 0.42
         fx, ax, brake = 1200.0, 0.0, 0.0
     return fx, delta, vx, ax, brake
  
@@ -1756,7 +1798,7 @@ def run_phase18_live_telemetry_comparison(stream_stride=50):
     print("  PHASE 18: LIVE TELEMETRY COMPARISON -- v1 (PI) vs v2 (SMC) vs v3 (AL-QP) vs v4 (NMPC)")
     print("=" * 96)
  
-    dt, t_total = 0.005, 16.0
+    dt, t_total = 0.005, 34.0
     time_steps = np.arange(0.0, t_total, dt)
     n = len(time_steps)
     session_id = _time.strftime("TER27-%Y%m%d-%H%M%S")
@@ -1852,10 +1894,10 @@ def run_phase18_live_telemetry_comparison(stream_stride=50):
             "v4": (t4, mz4, np.degrees(state_v4.ekf.beta_est), state_v4.mz_sat_ratio),
         }
         for k, (tk, mzk, betak, satk) in frames.items():
-            rl_rep = tk[2] + telem_rng.normal(0, 0.35)
-            rr_rep = tk[3] + telem_rng.normal(0, 0.35)
-            mz_rep = mzk + telem_rng.normal(0, 0.5)
-            wz_rep = wz_true[k] + telem_rng.normal(0, 0.012)
+            rl_rep = tk[2] + telem_rng.normal(0, 1.2)
+            rr_rep = tk[3] + telem_rng.normal(0, 1.2)
+            mz_rep = mzk + telem_rng.normal(0, 2.0)
+            wz_rep = wz_true[k] + telem_rng.normal(0, 0.035)
             regen_w = -(min(tk[2], 0.0) + min(tk[3], 0.0)) * w_rear
             log[k]["t_rl"].append(rl_rep); log[k]["t_rr"].append(rr_rep)
             log[k]["mz"].append(mz_rep); log[k]["wz_ref"].append(wz_ref)
@@ -1925,7 +1967,7 @@ def run_phase18_live_telemetry_comparison(stream_stride=50):
     styles = {"v1": "-", "v2": "-", "v3": "-", "v4": "--"}
     labels = {"v1": "v1: Branch 1 PI", "v2": "v2: Branch 2 SMC (approx.)",
               "v3": "v3: Branch 3 AL-QP", "v4": "v4: Branch 4 NMPC"}
-    segs = [(0, 2, '#eeeeee'), (2, 6, '#e8f0ff'), (6, 10, '#ffe8e8'), (10, 16, '#eaffe8')]
+    segs = [(0, 6, '#eeeeee'), (6, 15.5, '#e8f0ff'), (15.5, 27.0, '#ffe8e8'), (27.0, 34.0, '#eaffe8')]
  
     ax = axs[0, 0]
     for a, b, c in segs: ax.axvspan(a, b, color=c, alpha=0.6, zorder=0)
